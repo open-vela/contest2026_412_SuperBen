@@ -146,3 +146,10 @@ cd ..
 
 `contest2026_<编号>_<队伍名>` — 编号三位零填充；队名 slug（全小写、英文/拼音、连字符）。例：`contest2026_412_SuperBen`。
 （仓库由组委会统一创建，**每队仅一个仓**，无需自行命名。）
+
+
+## 作品
+- 赛道：新硬件适配（ESP32-P4X-Function-EV-Board，RISC-V）
+- 状态：固件编译通过（nuttx.bin 280KB，2026-08-26），待烧录验证
+- 移植补丁清单：esp32p4_移植补丁清单.md
+- 复现脚本：tools/fix_openvela_build.sh
