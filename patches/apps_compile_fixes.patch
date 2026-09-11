@@ -1,0 +1,28 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 04bb56b47..fbcb22c43 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -65,6 +65,7 @@ add_subdirectory(logging)
+ add_subdirectory(lte)
+ add_subdirectory(math)
+ add_subdirectory(mlearning)
++add_subdirectory(ai)
+ add_subdirectory(modbus)
+ add_subdirectory(netutils)
+ add_subdirectory(nshlib)
+diff --git a/mlearning/tflite-micro/CMakeLists.txt b/mlearning/tflite-micro/CMakeLists.txt
+index 37dfff84d..63e2be534 100644
+--- a/mlearning/tflite-micro/CMakeLists.txt
++++ b/mlearning/tflite-micro/CMakeLists.txt
+@@ -57,9 +57,9 @@ if(CONFIG_TFLITEMICRO)
+   # Enable debug logs and get time for the TFLM benchmark tool
+   if(CONFIG_TFLITEMICRO_BENCHMARK_TOOL)
+     list(APPEND COMMON_FLAGS -DTF_LITE_USE_CTIME)
+-  else()
+-    list(APPEND COMMON_FLAGS -DTF_LITE_STRIP_ERROR_STRINGS)
+   endif()
++  # Keep TFLM error strings: MicroPrintf() routes to syslog and prints the
++  # real AllocateTensors/op-resolution failure reasons on device.
+   # ############################################################################
+   # Sources
+   # ############################################################################

@@ -1,0 +1,22 @@
+--- a/nuttx/arch/risc-v/src/common/espressif/esp_i2c.c
++++ b/nuttx/arch/risc-v/src/common/espressif/esp_i2c.c
+@@ -156,8 +156,8 @@
+ #  define LP_I2C_BUS_CLK_ATOMIC()    PERIPH_RCC_ATOMIC()
+ #endif
+ 
+-#define SCL_PIN_ATTR (FUNCTION_2 || INPUT_PULLUP || OUTPUT_OPEN_DRAIN)
+-#define SDA_PIN_ATTR (FUNCTION_2 || INPUT_PULLUP || OUTPUT_OPEN_DRAIN)
++#define SCL_PIN_ATTR (FUNCTION_2 | INPUT_PULLUP | OUTPUT_OPEN_DRAIN)
++#define SDA_PIN_ATTR (FUNCTION_2 | INPUT_PULLUP | OUTPUT_OPEN_DRAIN)
+ 
+ /****************************************************************************
+  * Private Types
+@@ -1066,7 +1066,7 @@
+    * and an error didn't occur within the timeout
+    */
+ 
+-  while (current - timeout < 0 && priv->error == 0)
++  while ((int32_t)(current - timeout) < 0 && priv->error == 0)
+     {
+       /* Check if any interrupt triggered, clear them
+        * process the operation.
