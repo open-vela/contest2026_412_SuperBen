@@ -1,0 +1,4 @@
+
+source "$APPDIR/examples/objdetect/Kconfig"
+source "$APPDIR/examples/sa8339/Kconfig"
+source "$APPDIR/examples/chatui/Kconfig"
