@@ -1,0 +1,2008 @@
+diff --git a/packages/ai_agent/fix_esp32p4.sh b/packages/ai_agent/fix_esp32p4.sh
+new file mode 100644
+--- /dev/null
++++ b/packages/ai_agent/fix_esp32p4.sh
++#!/bin/bash
++# fix_esp32p4.sh - 把 fix_esp32s3.sh 的 4 个补丁移植到 ESP32-P4
++#
++# 用法（在首次 distclean 后的构建期间后台运行）：
++#   bash packages/ai_agent/fix_esp32p4.sh &
++#   ./build.sh esp32p4-function-ev-board:ai_agent
++#
++# 4 个补丁（都无法用 defconfig 表达）：
++#   1. apps/crypto/mbedtls/Make.defs: -I -> -isystem（让 ESP-IDF 的 mbedtls 头优先，
++#      因为 ESP-IDF 与 NuttX 的 cipher_info_t 等结构体布局不同）
++#   2. ESP-IDF mbedtls_config.h: 关闭 MBEDTLS_CCM_C（CCM*-NO-TAG 结构体冲突）
++#   3. ESP-IDF clk_ctrl_os.c: LOCK_INITIALIZER_UNLOCKED 0 -> SP_UNLOCKED
++#      （NuttX 的 spinlock_t 是结构体，不是 int）
++#   4. esp32p4_bringup.c: 挂载 tmpfs 到 /data（ai_agent 配置存储目录）
++
++set -uo pipefail
++
++SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
++ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
++APPS_DIR="$ROOT_DIR/apps"
++
++echo "[fix-p4] 等待 esp-hal-3rdparty 就绪..."
++
++# 定位 mbedtls_config.h（P4 的 hal 目录与 s3 不同，用 find 兜底）
++MBEDTLS_CFG=""
++for i in $(seq 1 180); do
++    MBEDTLS_CFG=$(find "$ROOT_DIR/nuttx/arch/risc-v/src/common/espressif" \
++                       "$ROOT_DIR/nuttx/arch/risc-v/src/esp32p4" \
++                       -path "*components/mbedtls/mbedtls/include/mbedtls/mbedtls_config.h" \
++                       -print 2>/dev/null | head -1)
++    if [ -n "$MBEDTLS_CFG" ] && grep -q "MBEDTLS_THREADING_C" "$MBEDTLS_CFG" 2>/dev/null; then
++        break
++    fi
++    sleep 1
++done
++
++if [ -z "$MBEDTLS_CFG" ]; then
++    echo "[fix-p4] WARN: 未找到 mbedtls_config.h（可能尚未下载 hal）"
++fi
++
++echo "[fix-p4] 应用补丁..."
++
++# ---- Fix 1: NuttX mbedtls 头文件优先级 ----------------------
++MAKEDEFS="$APPS_DIR/crypto/mbedtls/Make.defs"
++if [ -f "$MAKEDEFS" ]; then
++    sed -i 's|CFLAGS += ${INCDIR_PREFIX}$(APPDIR)/crypto/mbedtls/include|CFLAGS += -isystem $(APPDIR)/crypto/mbedtls/include|' "$MAKEDEFS"
++    sed -i 's|CFLAGS += ${INCDIR_PREFIX}$(APPDIR)/crypto/mbedtls/mbedtls/include|CFLAGS += -isystem $(APPDIR)/crypto/mbedtls/mbedtls/include|' "$MAKEDEFS"
++    sed -i 's|CXXFLAGS += ${INCDIR_PREFIX}$(APPDIR)/crypto/mbedtls/include|CXXFLAGS += -isystem $(APPDIR)/crypto/mbedtls/include|' "$MAKEDEFS"
++    sed -i 's|CXXFLAGS += ${INCDIR_PREFIX}$(APPDIR)/crypto/mbedtls/mbedtls/include|CXXFLAGS += -isystem $(APPDIR)/crypto/mbedtls/mbedtls/include|' "$MAKEDEFS"
++    echo "  [1/4] Make.defs: -isystem 已应用"
++else
++    echo "  [1/4] SKIP: 未找到 $MAKEDEFS"
++fi
++
++# ---- Fix 2: 关闭 CCM ---------------------------------------
++if [ -n "$MBEDTLS_CFG" ] && [ -f "$MBEDTLS_CFG" ]; then
++    sed -i 's/^#define MBEDTLS_CCM_C$/\/\* #define MBEDTLS_CCM_C \*\//' "$MBEDTLS_CFG"
++    echo "  [2/4] mbedtls_config.h: CCM 已关闭"
++else
++    echo "  [2/4] SKIP: mbedtls_config.h 不可用"
++fi
++
++# ---- Fix 3: spinlock 初始化宏 ------------------------------
++CLK_FILE=$(find "$ROOT_DIR/nuttx/arch/risc-v/src" -name "clk_ctrl_os.c" 2>/dev/null | head -1)
++if [ -n "$CLK_FILE" ] && [ -f "$CLK_FILE" ]; then
++    sed -i 's/#define LOCK_INITIALIZER_UNLOCKED       0/#define LOCK_INITIALIZER_UNLOCKED       SP_UNLOCKED/' "$CLK_FILE"
++    echo "  [3/4] clk_ctrl_os.c: spinlock 已修正"
++else
++    echo "  [3/4] SKIP: 未找到 clk_ctrl_os.c"
++fi
++
++# ---- Fix 4: /data tmpfs 挂载 -------------------------------
++BRINGUP="$ROOT_DIR/vendor/espressif/boards/esp32p4/esp32p4-function-ev-board/src/esp32p4_bringup.c"
++if [ -f "$BRINGUP" ]; then
++    if ! grep -q 'mount tmpfs at /data' "$BRINGUP" 2>/dev/null; then
++        python3 - "$BRINGUP" << 'PYEOF'
++import sys
++path = sys.argv[1]
++with open(path) as f:
++    content = f.read()
++
++# 在 CONFIG_LIBC_TMPDIR 的 tmpfs 挂载之后追加 /data 挂载
++marker = 'CONFIG_LIBC_TMPDIR'
++idx = content.find(marker)
++if idx < 0:
++    print('pattern not found')
++    sys.exit(0)
++
++# 找到该 mount 块的 #endif
++end = content.find('#endif', idx)
++if end < 0:
++    print('no endif found')
++    sys.exit(0)
++
++insert = '''
++  /* Mount tmpfs at /data for ai_agent config store */
++
++  ret = nx_mount(NULL, "/data", "tmpfs", 0, NULL);
++  if (ret < 0)
++    {
++      syslog(LOG_ERR, "ERROR: Failed to mount tmpfs at /data: %d\\n", ret);
++    }
++'''
++content = content[:end] + insert + content[end:]
++with open(path, 'w') as f:
++    f.write(content)
++print('ok')
++PYEOF
++        echo "  [4/4] esp32p4_bringup.c: /data tmpfs 挂载已加入"
++    else
++        echo "  [4/4] esp32p4_bringup.c: /data 挂载已存在"
++    fi
++else
++    echo "  [4/4] SKIP: 未找到 $BRINGUP"
++fi
++
++echo "[fix-p4] 全部补丁应用完毕。"
++
+diff --git a/packages/ai_agent/include/voice/mimo_asr.h b/packages/ai_agent/include/voice/mimo_asr.h
+new file mode 100644
+--- /dev/null
++++ b/packages/ai_agent/include/voice/mimo_asr.h
++/*
++ * Copyright (C) 2026 Xiaomi Corporation
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Register the MiMo (Xiaomi) ASR backend with the voice_asr framework. */
++int mimo_asr_register(void);
++
++#ifdef __cplusplus
++}
++#endif
++
+diff --git a/packages/ai_agent/include/voice/mimo_tts.h b/packages/ai_agent/include/voice/mimo_tts.h
+new file mode 100644
+--- /dev/null
++++ b/packages/ai_agent/include/voice/mimo_tts.h
++/*
++ * MiMo TTS 后端 —— openvela 语音助手
++ * 照 volc_tts.c 结构，把 volcengine API 换成 MiMo TTS。
++ * 链路：文本 → HTTPS POST /v1/chat/completions (mimo-v2.5-tts)
++ *       → 解析 choices[0].message.audio.data (base64 WAV)
++ *       → base64 解码 → 跳过 WAV 头 → 输出 16k/16bit/mono PCM
++ */
++#pragma once
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++int mimo_tts_register(void);
++
++#ifdef __cplusplus
++}
++#endif
++
+diff --git a/packages/ai_agent/src/voice/mimo_asr.c b/packages/ai_agent/src/voice/mimo_asr.c
+new file mode 100644
+--- /dev/null
++++ b/packages/ai_agent/src/voice/mimo_asr.c
++/****************************************************************************
++ * packages/ai_agent/src/voice/mimo_asr.c
++ *
++ * MiMo (Xiaomi) ASR backend for the voice_asr framework.
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * 链路：PCM(16k/16bit/mono) → 套 WAV 头 → base64 → HTTPS POST
++ *       POST {host}/v1/chat/completions
++ *       {"model":"mimo-v2.5-asr","messages":[...input_audio...],
++ *        "asr_options":{"language":"zh"}}
++ *     取文本：choices[0].message.content
++ *
++ * 说明：MiMo 只接受 wav/mp3（不接受裸 PCM），因此这里必须先封装 WAV 头。
++ *       base64 后大小上限 10MB。
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++
++#include <errno.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <sys/time.h>
++#include <syslog.h>
++
++#include "voice/voice_asr.h"
++#include "infra/config_store.h"
++#include "infra/http_proxy.h"
++#include "agent_compat.h"
++#include "agent_config.h"
++
++#include "cJSON.h"
++#include "mbedtls/base64.h"
++#include "mbedtls/ctr_drbg.h"
++#include "mbedtls/error.h"
++#include "mbedtls/net_sockets.h"
++#include "mbedtls/ssl.h"
++
++#define TAG "mimo_asr"
++
++/* ── 端点与模型（实测确认） ─────────────────────────────────── */
++
++#define MIMO_ASR_HOST_DEF   "token-plan-cn.xiaomimimo.com"
++#define MIMO_ASR_PORT       "443"
++#define MIMO_ASR_PATH       "/v1/chat/completions"
++#define MIMO_ASR_MODEL      "mimo-v2.5-asr"
++#define MIMO_ASR_LANG_DEF   "zh"
++
++#define MIMO_ASR_MAX_B64    (9 * 1024 * 1024)   /* base64 上限 10MB，留余量 */
++
++/* ── TLS 上下文（沿用 volc_asr.c 的范式） ───────────────────── */
++
++typedef struct
++{
++  mbedtls_ssl_context      ssl;
++  mbedtls_ssl_config       cfg;
++  mbedtls_net_context      net;
++  mbedtls_ctr_drbg_context ctr_drbg;
++} mimo_tls_ctx_t;
++
++static char s_api_key[192];
++static char s_host[128];
++static char s_lang[8];
++
++/* 熵源 */
++static int mimo_entropy_func(void *data, unsigned char *out, size_t len)
++{
++  (void)data;
++  if (agent_secure_random(out, len) == 0)
++    {
++      return 0;
++    }
++
++  syslog(LOG_ERR, "[%s] CRITICAL: No secure entropy source available\n", TAG);
++  return -1;
++}
++
++static int mimo_tls_connect(mimo_tls_ctx_t *ctx, const char *host,
++                            const char *port)
++{
++  int ret;
++
++  mbedtls_ssl_init(&ctx->ssl);
++  mbedtls_ssl_config_init(&ctx->cfg);
++  mbedtls_net_init(&ctx->net);
++  mbedtls_ctr_drbg_init(&ctx->ctr_drbg);
++
++  const char *pers = "mimo_asr";
++
++  ret = mbedtls_ctr_drbg_seed(&ctx->ctr_drbg, mimo_entropy_func, NULL,
++                              (const unsigned char *)pers, strlen(pers));
++  if (ret != 0)
++    {
++      syslog(LOG_ERR, "[%s] ctr_drbg_seed: -0x%04x\n", TAG, -ret);
++      return -EIO;
++    }
++
++  if (http_proxy_is_enabled())
++    {
++      int tunnel_fd = proxy_open_tunnel(host, atoi(port), 30000);
++      if (tunnel_fd < 0)
++        {
++          syslog(LOG_ERR, "[%s] proxy tunnel failed\n", TAG);
++          return -ECONNREFUSED;
++        }
++
++      ctx->net.fd = tunnel_fd;
++      syslog(LOG_INFO, "[%s] Using proxy tunnel fd=%d\n", TAG, tunnel_fd);
++    }
++  else
++    {
++      ret = mbedtls_net_connect(&ctx->net, host, port, MBEDTLS_NET_PROTO_TCP);
++      if (ret != 0)
++        {
++          syslog(LOG_ERR, "[%s] net_connect %s:%s: -0x%04x\n",
++                 TAG, host, port, -ret);
++          return -ECONNREFUSED;
++        }
++    }
++
++  mbedtls_net_set_block(&ctx->net);
++  if (ctx->net.fd >= 0)
++    {
++      struct timeval tv = { .tv_sec = 60, .tv_usec = 0 };
++      setsockopt(ctx->net.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
++    }
++
++  ret = mbedtls_ssl_config_defaults(&ctx->cfg, MBEDTLS_SSL_IS_CLIENT,
++                                    MBEDTLS_SSL_TRANSPORT_STREAM,
++                                    MBEDTLS_SSL_PRESET_DEFAULT);
++  if (ret != 0)
++    {
++      return -EIO;
++    }
++
++  mbedtls_ssl_conf_min_tls_version(&ctx->cfg, MBEDTLS_SSL_VERSION_TLS1_2);
++#if defined(MBEDTLS_SSL_PROTO_TLS1_3)
++  mbedtls_ssl_conf_max_tls_version(&ctx->cfg, MBEDTLS_SSL_VERSION_TLS1_3);
++#else
++  mbedtls_ssl_conf_max_tls_version(&ctx->cfg, MBEDTLS_SSL_VERSION_TLS1_2);
++#endif
++
++#if defined(MBEDTLS_SSL_ALPN)
++    {
++      static const char *alpn[] = { "http/1.1", NULL };
++      mbedtls_ssl_conf_alpn_protocols(&ctx->cfg, alpn);
++    }
++#endif
++
++  /* 与 volc_asr 一致：不做证书链严格校验，避免板子缺 CA 导致握手失败 */
++  mbedtls_ssl_conf_authmode(&ctx->cfg, MBEDTLS_SSL_VERIFY_OPTIONAL);
++  mbedtls_ssl_conf_rng(&ctx->cfg, mbedtls_ctr_drbg_random, &ctx->ctr_drbg);
++
++  ret = mbedtls_ssl_setup(&ctx->ssl, &ctx->cfg);
++  if (ret != 0)
++    {
++      return -EIO;
++    }
++
++  mbedtls_ssl_set_hostname(&ctx->ssl, host);
++  mbedtls_ssl_set_bio(&ctx->ssl, &ctx->net, mbedtls_net_send,
++                      mbedtls_net_recv, NULL);
++
++  while ((ret = mbedtls_ssl_handshake(&ctx->ssl)) != 0)
++    {
++      if (ret != MBEDTLS_ERR_SSL_WANT_READ
++          && ret != MBEDTLS_ERR_SSL_WANT_WRITE)
++        {
++          syslog(LOG_ERR, "[%s] handshake: -0x%04x\n", TAG, -ret);
++          return -EIO;
++        }
++    }
++
++  syslog(LOG_INFO, "[%s] TLS connected to %s:%s\n", TAG, host, port);
++  return 0;
++}
++
++static void mimo_tls_free(mimo_tls_ctx_t *ctx)
++{
++  mbedtls_ssl_close_notify(&ctx->ssl);
++  mbedtls_net_free(&ctx->net);
++  mbedtls_ssl_free(&ctx->ssl);
++  mbedtls_ssl_config_free(&ctx->cfg);
++  mbedtls_ctr_drbg_free(&ctx->ctr_drbg);
++}
++
++static int mimo_tls_write_all(mimo_tls_ctx_t *ctx, const char *buf, size_t len)
++{
++  size_t written = 0;
++
++  while (written < len)
++    {
++      int ret = mbedtls_ssl_write(&ctx->ssl,
++                                  (const unsigned char *)buf + written,
++                                  len - written);
++      if (ret > 0)
++        {
++          written += (size_t)ret;
++        }
++      else if (ret != MBEDTLS_ERR_SSL_WANT_WRITE)
++        {
++          syslog(LOG_ERR, "[%s] ssl_write: -0x%04x\n", TAG, -ret);
++          return -EIO;
++        }
++    }
++
++  return 0;
++}
++
++/* ── WAV 头（16kHz / 16bit / 单声道） ───────────────────────── */
++
++static size_t mimo_wav_header(unsigned char *h,
++                              uint32_t pcm_len,
++                              uint32_t rate,
++                              uint16_t channels,
++                              uint16_t bits)
++{
++  uint32_t byte_rate = rate * channels * (bits / 8);
++  uint16_t align     = channels * (bits / 8);
++  size_t   n         = 0;
++
++#define PUT_LE32(v) do { h[n++] = (unsigned char)((v) & 0xff); \
++                         h[n++] = (unsigned char)(((v) >> 8) & 0xff); \
++                         h[n++] = (unsigned char)(((v) >> 16) & 0xff); \
++                         h[n++] = (unsigned char)(((v) >> 24) & 0xff); \
++                       } while (0)
++#define PUT_LE16(v) do { h[n++] = (unsigned char)((v) & 0xff); \
++                         h[n++] = (unsigned char)(((v) >> 8) & 0xff); \
++                       } while (0)
++#define PUT_TAG(s)  do { h[n++] = (unsigned char)(s)[0]; \
++                         h[n++] = (unsigned char)(s)[1]; \
++                         h[n++] = (unsigned char)(s)[2]; \
++                         h[n++] = (unsigned char)(s)[3]; \
++                       } while (0)
++
++  PUT_TAG("RIFF");
++  PUT_LE32(36 + pcm_len);
++  PUT_TAG("WAVE");
++  PUT_TAG("fmt ");
++  PUT_LE32(16);
++  PUT_LE16(1);              /* PCM */
++  PUT_LE16(channels);
++  PUT_LE32(rate);
++  PUT_LE32(byte_rate);
++  PUT_LE16(align);
++  PUT_LE16(bits);
++  PUT_TAG("data");
++  PUT_LE32(pcm_len);
++
++#undef PUT_LE32
++#undef PUT_LE16
++#undef PUT_TAG
++
++  return n;   /* 44 */
++}
++
++/* ── 一次性 HTTPS POST，响应体写入 out ──────────────────────── */
++
++static int mimo_https_post(const char *host, const char *path,
++                           const char *api_key, const char *body,
++                           size_t body_len, char **out, size_t *out_len)
++{
++  mimo_tls_ctx_t ctx;
++  char *hdr = NULL;
++  char *resp = NULL;
++  size_t cap = 256 * 1024;
++  size_t total = 0;
++  int ret;
++  int rc = -EIO;
++
++  *out = NULL;
++  *out_len = 0;
++
++  ret = mimo_tls_connect(&ctx, host, MIMO_ASR_PORT);
++  if (ret != 0)
++    {
++      return ret;
++    }
++
++  /* 请求头 */
++  size_t hdr_cap = strlen(path) + strlen(host) + strlen(api_key) + 256;
++  hdr = malloc(hdr_cap);
++  if (hdr == NULL)
++    {
++      rc = -ENOMEM;
++      goto out_free;
++    }
++
++  int hn = snprintf(hdr, hdr_cap,
++                    "POST %s HTTP/1.1\r\n"
++                    "Host: %s\r\n"
++                    "api-key: %s\r\n"
++                    "Content-Type: application/json\r\n"
++                    "Content-Length: %u\r\n"
++                    "Connection: close\r\n"
++                    "\r\n",
++                    path, host, api_key, (unsigned)body_len);
++  if (hn <= 0 || (size_t)hn >= hdr_cap)
++    {
++      goto out_free;
++    }
++
++  if (mimo_tls_write_all(&ctx, hdr, (size_t)hn) != 0)
++    {
++      goto out_free;
++    }
++
++  if (mimo_tls_write_all(&ctx, body, body_len) != 0)
++    {
++      goto out_free;
++    }
++
++  /* 读响应（Connection: close → 读到 EOF） */
++  resp = malloc(cap + 1);
++  if (resp == NULL)
++    {
++      rc = -ENOMEM;
++      goto out_free;
++    }
++
++  for (;;)
++    {
++      unsigned char tmp[4096];
++      int r = mbedtls_ssl_read(&ctx.ssl, tmp, sizeof(tmp));
++
++      if (r > 0)
++        {
++          if (total + (size_t)r > cap)
++            {
++              /* 扩容（ASR 响应很小，正常不会走到这里） */
++              size_t ncap = cap * 2;
++              char *np = realloc(resp, ncap + 1);
++              if (np == NULL)
++                {
++                  rc = -ENOMEM;
++                  goto out_free;
++                }
++
++              resp = np;
++              cap = ncap;
++            }
++
++          memcpy(resp + total, tmp, (size_t)r);
++          total += (size_t)r;
++        }
++      else if (r == MBEDTLS_ERR_SSL_WANT_READ
++               || r == MBEDTLS_ERR_SSL_WANT_WRITE)
++        {
++          continue;
++        }
++      else
++        {
++          /* r == 0 (EOF) 或负错误码 → 结束读取 */
++          break;
++        }
++    }
++
++  if (total == 0)
++    {
++      syslog(LOG_ERR, "[%s] empty response\n", TAG);
++      goto out_free;
++    }
++
++  resp[total] = '\0';
++
++  /* 跳过 HTTP 头 */
++  char *bodyp = strstr(resp, "\r\n\r\n");
++  if (bodyp == NULL)
++    {
++      syslog(LOG_ERR, "[%s] malformed HTTP response\n", TAG);
++      goto out_free;
++    }
++
++  bodyp += 4;
++
++  /* 简单处理 chunked（若服务器忽略 Connection: close） */
++  if (strstr(resp, "Transfer-Encoding: chunked") != NULL)
++    {
++      char *src = bodyp;
++      char *dst = bodyp;
++      while (*src != '\0')
++        {
++          char *endp = NULL;
++          long clen = strtol(src, &endp, 16);
++          if (clen <= 0 || endp == NULL)
++            {
++              break;
++            }
++
++          src = endp;
++          if (*src == '\r') src++;
++          if (*src == '\n') src++;
++
++          if ((size_t)clen > (size_t)(resp + total - src))
++            {
++              clen = (long)(resp + total - src);
++            }
++
++          memmove(dst, src, (size_t)clen);
++          dst += clen;
++          src += clen;
++
++          while (*src == '\r' || *src == '\n') src++;
++        }
++
++      *dst = '\0';
++    }
++
++  *out = bodyp;
++  *out_len = strlen(bodyp);
++  rc = 0;
++
++out_free:
++  if (hdr != NULL)
++    {
++      free(hdr);
++    }
++
++  mimo_tls_free(&ctx);
++
++  if (rc != 0 && resp != NULL)
++    {
++      free(resp);
++    }
++
++  return rc;
++}
++
++/* ── 从响应 JSON 提取 choices[0].message.content ────────────── */
++
++static int mimo_parse_text(const char *json, char *text_out, size_t text_cap)
++{
++  cJSON *root = cJSON_Parse(json);
++  if (root == NULL)
++    {
++      syslog(LOG_ERR, "[%s] JSON parse failed\n", TAG);
++      return -EINVAL;
++    }
++
++  int rc = -ENOENT;
++  cJSON *choices = cJSON_GetObjectItem(root, "choices");
++  cJSON *c0 = cJSON_IsArray(choices) ? cJSON_GetArrayItem(choices, 0) : NULL;
++  cJSON *msg = c0 != NULL ? cJSON_GetObjectItem(c0, "message") : NULL;
++  cJSON *content = msg != NULL ? cJSON_GetObjectItem(msg, "content") : NULL;
++
++  if (content != NULL && cJSON_IsString(content) && content->valuestring != NULL)
++    {
++      strncpy(text_out, content->valuestring, text_cap - 1);
++      text_out[text_cap - 1] = '\0';
++      rc = 0;
++    }
++  else
++    {
++      /* 打印错误信息便于排障 */
++      cJSON *err = cJSON_GetObjectItem(root, "error");
++      if (err != NULL)
++        {
++          cJSON *em = cJSON_GetObjectItem(err, "message");
++          syslog(LOG_ERR, "[%s] API error: %s\n", TAG,
++                 (em && cJSON_IsString(em)) ? em->valuestring : "(unknown)");
++        }
++    }
++
++  cJSON_Delete(root);
++  return rc;
++}
++
++/* ── 后端实现 ───────────────────────────────────────────────── */
++
++static int mimo_asr_init(void)
++{
++  memset(s_api_key, 0, sizeof(s_api_key));
++  memset(s_host, 0, sizeof(s_host));
++  memset(s_lang, 0, sizeof(s_lang));
++
++  if (claw_config_get(AGENT_CFG_KEY_MIMO_API_KEY, s_api_key,
++                      sizeof(s_api_key)) != OK
++      || s_api_key[0] == '\0')
++    {
++      syslog(LOG_ERR, "[%s] MiMo api key not configured\n", TAG);
++    }
++
++  if (claw_config_get(AGENT_CFG_KEY_MIMO_ASR_HOST, s_host,
++                      sizeof(s_host)) != OK
++      || s_host[0] == '\0')
++    {
++      strncpy(s_host, MIMO_ASR_HOST_DEF, sizeof(s_host) - 1);
++    }
++
++  if (claw_config_get(AGENT_CFG_KEY_MIMO_ASR_LANG, s_lang,
++                      sizeof(s_lang)) != OK
++      || s_lang[0] == '\0')
++    {
++      strncpy(s_lang, MIMO_ASR_LANG_DEF, sizeof(s_lang) - 1);
++    }
++
++  return 0;
++}
++
++static int mimo_asr_recognize(const unsigned char *pcm_data, size_t pcm_len,
++                              char *text_out, size_t text_cap)
++{
++  unsigned char wav_hdr[44];
++  unsigned char *wav = NULL;
++  unsigned char *b64 = NULL;
++  char *json = NULL;
++  char *resp = NULL;
++  size_t resp_len = 0;
++  size_t hdr_len;
++  size_t wav_len;
++  size_t b64_cap;
++  size_t b64_len = 0;
++  size_t json_cap;
++  int rc;
++
++  /* 每次调用重新载入凭证（运行期可能被改） */
++  mimo_asr_init();
++
++  if (s_api_key[0] == '\0')
++    {
++      syslog(LOG_ERR, "[%s] ASR credentials not configured\n", TAG);
++      return -ENOENT;
++    }
++
++  if (pcm_data == NULL || pcm_len == 0)
++    {
++      return -EINVAL;
++    }
++
++  /* ① 套 WAV 头 */
++  hdr_len = mimo_wav_header(wav_hdr, (uint32_t)pcm_len, 16000, 1, 16);
++  wav_len = hdr_len + pcm_len;
++
++  wav = malloc(wav_len);
++  if (wav == NULL)
++    {
++      rc = -ENOMEM;
++      goto out;
++    }
++
++  memcpy(wav, wav_hdr, hdr_len);
++  memcpy(wav + hdr_len, pcm_data, pcm_len);
++
++  /* ② base64 */
++  b64_cap = 4 * ((wav_len + 2) / 3) + 4;
++  if (b64_cap > MIMO_ASR_MAX_B64)
++    {
++      syslog(LOG_ERR, "[%s] audio too large: base64=%u > %u\n",
++             TAG, (unsigned)b64_cap, (unsigned)MIMO_ASR_MAX_B64);
++      rc = -EFBIG;
++      goto out;
++    }
++
++  b64 = malloc(b64_cap);
++  if (b64 == NULL)
++    {
++      rc = -ENOMEM;
++      goto out;
++    }
++
++  rc = mbedtls_base64_encode(b64, b64_cap, &b64_len, wav, wav_len);
++  if (rc != 0)
++    {
++      syslog(LOG_ERR, "[%s] base64 encode failed: -0x%04x\n", TAG, -rc);
++      rc = -EIO;
++      goto out;
++    }
++
++  /* ③ 拼 JSON（直接拼接，省内存） */
++    {
++      static const char *pfx =
++        "{\"model\":\"" MIMO_ASR_MODEL "\","
++        "\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_audio\","
++        "\"input_audio\":{\"data\":\"data:audio/wav;base64,";
++      char sfx[128];
++
++      int sn = snprintf(sfx, sizeof(sfx),
++                        "\"}}]}],\"asr_options\":{\"language\":\"%s\"}}", s_lang);
++      if (sn <= 0 || (size_t)sn >= sizeof(sfx))
++        {
++          rc = -EINVAL;
++          goto out;
++        }
++
++      json_cap = strlen(pfx) + b64_len + (size_t)sn + 1;
++      json = malloc(json_cap);
++      if (json == NULL)
++        {
++          rc = -ENOMEM;
++          goto out;
++        }
++
++      size_t o = 0;
++      memcpy(json + o, pfx, strlen(pfx));
++      o += strlen(pfx);
++      memcpy(json + o, b64, b64_len);
++      o += b64_len;
++      memcpy(json + o, sfx, (size_t)sn);
++      o += (size_t)sn;
++      json[o] = '\0';
++    }
++
++  syslog(LOG_INFO, "[%s] POST %s (pcm=%u wav=%u json=%u)\n",
++         TAG, s_host, (unsigned)pcm_len, (unsigned)wav_len, (unsigned)json_cap);
++
++  /* ④ 发请求 */
++  rc = mimo_https_post(s_host, MIMO_ASR_PATH, s_api_key, json,
++                       strlen(json), &resp, &resp_len);
++  if (rc != 0)
++    {
++      syslog(LOG_ERR, "[%s] https post failed: %d\n", TAG, rc);
++      goto out;
++    }
++
++  /* ⑤ 取文本 */
++  rc = mimo_parse_text(resp, text_out, text_cap);
++  if (rc == 0)
++    {
++      syslog(LOG_INFO, "[%s] ASR ok: %s\n", TAG, text_out);
++    }
++
++out:
++  if (wav != NULL)  free(wav);
++  if (b64 != NULL)  free(b64);
++  if (json != NULL) free(json);
++  if (resp != NULL) free(resp);
++  return rc;
++}
++
++static const voice_asr_ops_t s_mimo_asr_ops =
++{
++  .name      = "mimo",
++  .init      = mimo_asr_init,
++  .recognize = mimo_asr_recognize,
++  .deinit    = NULL,
++};
++
++int mimo_asr_register(void)
++{
++  return voice_asr_register(&s_mimo_asr_ops);
++}
++
+diff --git a/packages/ai_agent/src/voice/mimo_tts.c b/packages/ai_agent/src/voice/mimo_tts.c
+new file mode 100644
+--- /dev/null
++++ b/packages/ai_agent/src/voice/mimo_tts.c
++/*
++ * MiMo TTS 后端 —— openvela 语音助手
++ *
++ * 链路：文本 → HTTPS POST {host}/v1/chat/completions (mimo-v2.5-tts)
++ *       → 解析 choices[0].message.audio.data (base64 WAV)
++ *       → base64 解码 → 跳过 WAV 头 → 输出 16k/16bit/mono PCM
++ *
++ * 认证头：api-key（Token Plan 实测可用）
++ */
++
++#include "voice/mimo_tts.h"
++#include "infra/config_store.h"
++#include "infra/vela_tls.h"
++#include "agent_compat.h"
++#include "agent_config.h"
++#include "voice/voice_tts.h"
++
++#include "cJSON.h"
++#include "mbedtls/base64.h"
++#include <stdlib.h>
++#include <string.h>
++#include <errno.h>
++
++static const char *TAG = "mimo_tts";
++
++#define MIMO_TTS_HOST   "token-plan-cn.xiaomimimo.com"
++#define MIMO_TTS_PORT   "443"
++#define MIMO_TTS_PATH   "/v1/chat/completions"
++#define MIMO_TTS_MODEL  "mimo-v2.5-tts"
++#define MIMO_TTS_VOICE  "mimo_default"     /* 英文音色 */
++#define MIMO_TTS_RESP_SIZE (512 * 1024)  /* 响应缓冲（音频 base64 较大） */
++
++static char s_api_key[128];
++
++static int mimo_tts_init(void)
++{
++    memset(s_api_key, 0, sizeof(s_api_key));
++    claw_config_get(AGENT_CFG_KEY_MIMO_API_KEY, s_api_key, sizeof(s_api_key));
++    return 0;
++}
++
++static char *build_tts_request(const char *text)
++{
++    cJSON *root = cJSON_CreateObject();
++    if (!root)
++        return NULL;
++
++    cJSON_AddStringToObject(root, "model", MIMO_TTS_MODEL);
++
++    cJSON *messages = cJSON_AddArrayToObject(root, "messages");
++
++    cJSON *m1 = cJSON_CreateObject();
++    cJSON_AddStringToObject(m1, "role", "user");
++    cJSON_AddStringToObject(m1, "content", "");
++    cJSON_AddItemToArray(messages, m1);
++
++    cJSON *m2 = cJSON_CreateObject();
++    cJSON_AddStringToObject(m2, "role", "assistant");
++    cJSON_AddStringToObject(m2, "content", text);
++    cJSON_AddItemToArray(messages, m2);
++
++    cJSON *audio = cJSON_CreateObject();
++    cJSON_AddStringToObject(audio, "format", "wav");
++    cJSON_AddStringToObject(audio, "voice", MIMO_TTS_VOICE);
++    cJSON_AddItemToObject(root, "audio", audio);
++
++    char *json_str = cJSON_PrintUnformatted(root);
++    cJSON_Delete(root);
++    return json_str;
++}
++
++/* 从 WAV 缓冲区里找到 PCM 数据的偏移（找 "data" chunk） */
++static size_t wav_data_offset(const unsigned char *wav, size_t len)
++{
++    if (len > 12 && memcmp(wav, "RIFF", 4) == 0 &&
++        memcmp(wav + 8, "WAVE", 4) == 0)
++    {
++        size_t pos = 12;
++        while (pos + 8 <= len)
++        {
++            uint32_t sz = (uint32_t)wav[pos + 4] |
++                          ((uint32_t)wav[pos + 5] << 8) |
++                          ((uint32_t)wav[pos + 6] << 16) |
++                          ((uint32_t)wav[pos + 7] << 24);
++            if (memcmp(wav + pos, "data", 4) == 0)
++            {
++                return pos + 8;
++            }
++            pos += 8 + sz + (sz & 1);   /* chunk 对齐到偶数 */
++        }
++    }
++    return 44;   /* 回退：标准 44 字节 RIFF 头 */
++}
++
++static int mimo_tts_synthesize(const char *text,
++                               unsigned char *pcm_out,
++                               size_t pcm_cap,
++                               size_t *pcm_len)
++{
++    if (!text || !pcm_out || !pcm_len)
++        return -EINVAL;
++
++    *pcm_len = 0;
++
++    mimo_tts_init();
++    if (s_api_key[0] == '\0')
++    {
++        syslog(LOG_ERR, "[%s] MiMo api key not configured\n", TAG);
++        return -ENOENT;
++    }
++
++    char *body = build_tts_request(text);
++    if (!body)
++        return -ENOMEM;
++
++    vela_header_t hdrs[] =
++    {
++        { "api-key", s_api_key },
++        { "Content-Type", "application/json" },
++        { "Connection", "close" },
++        { NULL, NULL }
++    };
++
++    char *resp = calloc(1, MIMO_TTS_RESP_SIZE);
++    if (!resp)
++    {
++        free(body);
++        return -ENOMEM;
++    }
++
++    size_t resp_len = 0;
++    int status = vela_https_request(MIMO_TTS_HOST, MIMO_TTS_PORT,
++                                    "POST", MIMO_TTS_PATH, hdrs,
++                                    body, strlen(body),
++                                    resp, MIMO_TTS_RESP_SIZE, &resp_len);
++    free(body);
++
++    if (status != 200)
++    {
++        syslog(LOG_ERR, "[%s] TTS HTTP %d: %.256s\n", TAG, status, resp);
++        free(resp);
++        return -EIO;
++    }
++
++    if (resp_len == 0)
++    {
++        syslog(LOG_ERR, "[%s] TTS: empty response\n", TAG);
++        free(resp);
++        return -EPROTO;
++    }
++
++    /* 解析 choices[0].message.audio.data */
++    cJSON *obj = cJSON_Parse(resp);
++    if (!obj)
++    {
++        syslog(LOG_ERR, "[%s] TTS: bad JSON\n", TAG);
++        free(resp);
++        return -EPROTO;
++    }
++
++    cJSON *choices = cJSON_GetObjectItem(obj, "choices");
++    cJSON *choice0 = choices ? cJSON_GetArrayItem(choices, 0) : NULL;
++    cJSON *message = choice0 ? cJSON_GetObjectItem(choice0, "message") : NULL;
++    cJSON *audio = message ? cJSON_GetObjectItem(message, "audio") : NULL;
++    cJSON *data_j = audio ? cJSON_GetObjectItem(audio, "data") : NULL;
++
++    if (!data_j || !cJSON_IsString(data_j))
++    {
++        syslog(LOG_ERR, "[%s] TTS: no audio.data field\n", TAG);
++        cJSON_Delete(obj);
++        free(resp);
++        return -EPROTO;
++    }
++
++    const char *b64 = data_j->valuestring;
++
++    /* 剥离可能的 "data:audio/wav;base64," 前缀 */
++    const char *comma = strstr(b64, "base64,");
++    if (comma)
++        b64 = comma + 7;
++
++    size_t b64_len = strlen(b64);
++    size_t wav_cap = b64_len * 3 / 4 + 16;
++    unsigned char *wav_buf = malloc(wav_cap);
++    if (!wav_buf)
++    {
++        cJSON_Delete(obj);
++        free(resp);
++        return -ENOMEM;
++    }
++
++    size_t wav_len = 0;
++    if (mbedtls_base64_decode(wav_buf, wav_cap, &wav_len,
++                              (const unsigned char *)b64, b64_len) != 0)
++    {
++        syslog(LOG_ERR, "[%s] TTS: base64 decode failed\n", TAG);
++        free(wav_buf);
++        cJSON_Delete(obj);
++        free(resp);
++        return -EPROTO;
++    }
++
++    /* 跳过 WAV 头取 PCM */
++    size_t offset = wav_data_offset(wav_buf, wav_len);
++    if (offset >= wav_len)
++    {
++        syslog(LOG_ERR, "[%s] TTS: WAV too short (%zu)\n", TAG, wav_len);
++        free(wav_buf);
++        cJSON_Delete(obj);
++        free(resp);
++        return -EPROTO;
++    }
++
++    size_t pcm = wav_len - offset;
++    if (pcm > pcm_cap)
++        pcm = pcm_cap;
++
++    memcpy(pcm_out, wav_buf + offset, pcm);
++    *pcm_len = pcm;
++
++    free(wav_buf);
++    cJSON_Delete(obj);
++    free(resp);
++
++    syslog(LOG_INFO, "[%s] TTS: synthesized %zu PCM bytes\n", TAG, pcm);
++    return 0;
++}
++
++static void mimo_tts_deinit(void)
++{
++}
++
++static const voice_tts_ops_t s_mimo_tts_ops =
++{
++    .name       = "mimo",
++    .init       = mimo_tts_init,
++    .synthesize = mimo_tts_synthesize,
++    .deinit     = mimo_tts_deinit,
++};
++
++int mimo_tts_register(void)
++{
++    return voice_tts_register(&s_mimo_tts_ops);
++}
++
+--- a/packages/ai_agent/CMakeLists.txt
++++ b/packages/ai_agent/CMakeLists.txt
+@@ -13,6 +13,9 @@
+ ################################################################################
+ 
+ if(CONFIG_EXAMPLES_AI_AGENT_VELA)
++
++  # ai_agent 里有 snprintf 截断告警；构建带 -Werror，这里降级为警告
++  add_compile_options(-Wno-format-truncation -Wno-format)
+ 
+   set(AGENT_SRCS
+     src/agent_main.c
+@@ -61,6 +64,8 @@
+     src/voice/volc_tts.c
+     src/voice/volc_tts_ws.c
+     src/voice/volc_asr.c
++    src/voice/mimo_asr.c
++    src/voice/mimo_tts.c
+     src/voice/voice_tts.c
+     src/voice/voice_asr.c
+     src/voice/audio_capture.c
+--- a/packages/ai_agent/include/agent_config.h
++++ b/packages/ai_agent/include/agent_config.h
+@@ -116,13 +116,13 @@
+  * a timeout and replies with a user-friendly error message.
+  * The socket-level SO_RCVTIMEO (AGENT_LLM_SOCKET_TIMEOUT_SEC)
+  * acts as the hard backstop that actually unblocks the read. */
+-#define AGENT_LLM_TIMEOUT_SEC 60
++#define AGENT_LLM_TIMEOUT_SEC 120
+ 
+ /* Socket-level read timeout applied via SO_RCVTIMEO in vela_tls.
+  * Must be >= AGENT_LLM_TIMEOUT_SEC to allow the agent-level
+  * watchdog to fire first on normal slow responses.  Set higher
+  * to cover TLS handshake + full response read. */
+-#define AGENT_LLM_SOCKET_TIMEOUT_SEC 120
++#define AGENT_LLM_SOCKET_TIMEOUT_SEC 180
+ 
+ /* ── Timezone (POSIX TZ format) ────────────────────────────── */
+ #define AGENT_TIMEZONE "CST-8"
+@@ -256,6 +256,11 @@
+ #define AGENT_CFG_KEY_GATEWAY_PORT "gateway_port"
+ #define AGENT_CFG_KEY_GATEWAY_TOKEN "gateway_token"
+ 
++/* ── MiMo (Xiaomi) 语音 ─────────────────────────────── */
++#define AGENT_CFG_KEY_MIMO_API_KEY "mimo_api_key"
++#define AGENT_CFG_KEY_MIMO_ASR_HOST "mimo_asr_host"
++#define AGENT_CFG_KEY_MIMO_ASR_LANG "mimo_asr_lang"
++
+ /* ── Vision / Multimodal ─────────────────────────────────────── */
+ #define AGENT_VISION_MAX_IMAGE_SIZE \
+     (256 * 1024) /* max JPEG file size: 256 KB */
+@@ -352,7 +357,7 @@
+ #define AGENT_AUDIO_CAPTURE_DEV "/dev/audio/pcm0c"
+ #endif
+ #ifndef AGENT_AUDIO_PLAYBACK_DEV
+-#define AGENT_AUDIO_PLAYBACK_DEV "/dev/audio/pcm0p"
++#define AGENT_AUDIO_PLAYBACK_DEV "/dev/audio/pcm0"
+ #endif
+ 
+ /* Audio chunk size for streaming: 3200 bytes = 100ms at 16kHz/16bit/mono */
+--- a/packages/ai_agent/src/channels/cmd_llm.c
++++ b/packages/ai_agent/src/channels/cmd_llm.c
+@@ -47,7 +47,7 @@
+     { "glm", "open.bigmodel.cn", "/api/paas/v4/chat/completions", "glm-4-flash", 1 },
+     { "openai", "api.openai.com", "/v1/chat/completions", "gpt-4o", 3 },
+     { "claude", "api.anthropic.com", "/v1/messages", "claude-sonnet-4-20250514", 3 },
+-    { "mimo", "api.xiaomimimo.com", "/v1/chat/completions", "mimo-v2-flash", 1 },
++    { "mimo", "token-plan-cn.xiaomimimo.com", "/v1/chat/completions", "mimo-v2.5-pro", 1 },
+     { "openrouter", "openrouter.ai", "/api/v1/chat/completions",
+         "openrouter/hunter-alpha", 2 },
+     { NULL, NULL, NULL, NULL, 0 }
+@@ -69,7 +69,7 @@
+                "  glm      - open.bigmodel.cn  (glm-4-flash)\n"
+                "  openai   - api.openai.com  (gpt-4o)\n"
+                "  openrouter - openrouter.ai  (openrouter/hunter-alpha)\n"
+-               "  mimo     - api.xiaomimimo.com  (MiMo-v2-Flash)\n"
++               "  mimo     - token-plan-cn.xiaomimimo.com  (mimo-v2.5-pro)\n"
+                "\n"
+                "URL format (for custom endpoints):\n"
+                "  set_llm http://host:port/path model key\n"
+--- a/packages/ai_agent/src/channels/cmd_voice.c
++++ b/packages/ai_agent/src/channels/cmd_voice.c
+@@ -33,6 +33,16 @@
+     }
+     claw_config_set(AGENT_CFG_KEY_VOLC_API_KEY, argv[1]);
+     printf("Doubao voice API key saved.\n");
++}
++
++void cmd_set_mimo_key(int argc, char** argv)
++{
++    if (argc < 2) {
++        printf("Usage: set_mimo_key <api_key>\n");
++        return;
++    }
++    claw_config_set(AGENT_CFG_KEY_MIMO_API_KEY, argv[1]);
++    printf("MiMo API key saved. Use: set_voice_asr mimo\n");
+ }
+ 
+ void cmd_set_volc_speaker(int argc, char** argv)
+--- a/packages/ai_agent/src/channels/cmd_voice.h
++++ b/packages/ai_agent/src/channels/cmd_voice.h
+@@ -17,6 +17,7 @@
+ #pragma once
+ 
+ void cmd_set_volc_key(int argc, char** argv);
++void cmd_set_mimo_key(int argc, char** argv);
+ void cmd_set_volc_speaker(int argc, char** argv);
+ void cmd_set_volc_asr(int argc, char** argv);
+ void cmd_voice_start(void);
+--- a/packages/ai_agent/src/channels/nsh_commands.c
++++ b/packages/ai_agent/src/channels/nsh_commands.c
+@@ -128,6 +128,7 @@
+         "  quit                 - Exit agent\n"
+         "  set_mqtt <broker> [client_id] - Set MQTT broker (host:port)\n"
+         "  set_volc_key <api_key>       - Set Doubao voice API key\n"
++        "  set_mimo_key <api_key>       - Set MiMo (Xiaomi) API key\n"
+         "  set_volc_asr <id> <tok> <cluster> - Set ASR credentials\n"
+         "  set_volc_speaker <id>  - Set TTS voice (e.g. zh_female_cancan)\n"
+         "  voice_start            - Start voice channel\n"
+@@ -994,6 +995,8 @@
+             cmd_set_mqtt(argc, argv);
+         else if (strcmp(cmd, "set_volc_key") == 0)
+             cmd_set_volc_key(argc, argv);
++        else if (strcmp(cmd, "set_mimo_key") == 0)
++            cmd_set_mimo_key(argc, argv);
+         else if (strcmp(cmd, "set_volc_asr") == 0)
+             cmd_set_volc_asr(argc, argv);
+         else if (strcmp(cmd, "set_volc_speaker") == 0)
+--- a/packages/ai_agent/src/core/agent_loop.c
++++ b/packages/ai_agent/src/core/agent_loop.c
+@@ -43,6 +43,8 @@
+ #include <string.h>
+ #include <strings.h>
+ #include <sys/time.h>
++#include <fcntl.h>
++#include <mqueue.h>
+ 
+ #include "cJSON.h"
+ 
+@@ -90,6 +92,15 @@
+     }
+ 
+     return (uint32_t)sec_diff * 1000 + (uint32_t)usec_diff / 1000;
++}
++
++/* 单调时钟取时间（看门狗计时用，不受 CLOCK_REALTIME 拨表影响） */
++static inline void mono_now(struct timeval* tv)
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    tv->tv_sec = (time_t)ts.tv_sec;
++    tv->tv_usec = (suseconds_t)(ts.tv_nsec / 1000);
+ }
+ 
+ /* ── Memory pool (pre-allocated tool output buffers) ───────── */
+@@ -820,9 +831,9 @@
+     llm_response_t resp;
+     char* result = NULL;
+     struct timeval t0, t1;
+-    gettimeofday(&t0, NULL);
++    mono_now(&t0);
+     int err = llm_chat_tools(system_prompt, messages, NULL, &resp);
+-    gettimeofday(&t1, NULL);
++    mono_now(&t1);
+     uint32_t ms = calc_elapsed_ms(&t0, &t1);
+     bool timed_out = llm_call_timed_out(ms);
+ 
+@@ -836,6 +847,37 @@
+     }
+ 
+     return strip_tool_call_markup(result);
++}
++
++/* ── 实时通知 chatui 界面（消息队列）────────────── */
++static void chatui_notify(const char *text, int from_user)
++{
++  struct { uint8_t from_user; char text[256]; } m;
++  static mqd_t mq = (mqd_t)-1;
++
++  if (text == NULL || text[0] == '\0')
++    {
++      return;
++    }
++
++  if (mq == (mqd_t)-1)
++    {
++      struct mq_attr attr;
++      attr.mq_maxmsg  = 16;
++      attr.mq_msgsize = sizeof(m);
++      attr.mq_flags   = 0;
++      mq = mq_open("chatmq", O_WRONLY | O_CREAT | O_NONBLOCK, 0666, &attr);
++      if (mq == (mqd_t)-1)
++        {
++          syslog(LOG_ERR, "[chatui_notify] mq_open errno=%d\n", errno);
++          return;
++        }
++    }
++
++  memset(&m, 0, sizeof(m));
++  m.from_user = (uint8_t)from_user;
++  strncpy(m.text, text, sizeof(m.text) - 1);
++  mq_send(mq, (const char *)&m, sizeof(m), 0);
+ }
+ 
+ /* ── Extracted: dispatch response to outbound bus ─────────── */
+@@ -846,6 +888,10 @@
+     if (final_text && final_text[0]) {
+         session_append(msg->chat_id, "user", msg->content);
+         session_append(msg->chat_id, "assistant", final_text);
++
++        /* 实时推送到 chatui：用户原文(绿气泡) + 助手回复(白气泡) */
++        chatui_notify(msg->content, 1);
++        chatui_notify(final_text, 0);
+ 
+         agent_msg_t out = { 0 };
+         strncpy(out.channel, msg->channel,
+@@ -990,9 +1036,9 @@
+     llm_response_t final_resp;
+     char* result = NULL;
+     struct timeval t0, t1;
+-    gettimeofday(&t0, NULL);
++    mono_now(&t0);
+     int err = llm_chat_tools(sys_prompt, messages, NULL, &final_resp);
+-    gettimeofday(&t1, NULL);
++    mono_now(&t1);
+     uint32_t ms = calc_elapsed_ms(&t0, &t1);
+     bool timed_out = llm_call_timed_out(ms);
+ 
+@@ -1065,9 +1111,9 @@
+ 
+         llm_response_t resp;
+         struct timeval tv_start, tv_end;
+-        gettimeofday(&tv_start, NULL);
++        mono_now(&tv_start);
+         int err = llm_chat_tools(sys_prompt, messages, tools_json, &resp);
+-        gettimeofday(&tv_end, NULL);
++        mono_now(&tv_end);
+         uint32_t latency_ms = calc_elapsed_ms(&tv_start, &tv_end);
+ 
+         /* Router failover: on LLM call failure, try next backend */
+@@ -1083,10 +1129,10 @@
+                 router_idx = next_idx;
+                 trace.backend_idx = next_idx;
+                 llm_response_free(&resp);
+-                gettimeofday(&tv_start, NULL);
++                mono_now(&tv_start);
+                 err = llm_chat_tools(sys_prompt, messages,
+                     tools_json, &resp);
+-                gettimeofday(&tv_end, NULL);
++                mono_now(&tv_end);
+                 latency_ms = calc_elapsed_ms(&tv_start, &tv_end);
+             }
+         }
+@@ -1183,10 +1229,10 @@
+                     router_idx = prem_idx;
+                     trace.backend_idx = prem_idx;
+ 
+-                    gettimeofday(&tv_start, NULL);
++                    mono_now(&tv_start);
+                     err = llm_chat_tools(sys_prompt, messages,
+                         tools_json, &resp);
+-                    gettimeofday(&tv_end, NULL);
++                    mono_now(&tv_end);
+                     latency_ms = calc_elapsed_ms(&tv_start, &tv_end);
+ 
+                     /* Watchdog check on cascade retry */
+@@ -1448,10 +1494,9 @@
+             "[%s] Pool init failed, using heap fallback\n", TAG);
+     }
+ 
+-    char* tools_json = tool_registry_get_tools_json();
+-
+-    syslog(LOG_INFO, "[%s] Tools JSON loaded: %d bytes\n",
+-        TAG, tools_json ? (int)strlen(tools_json) : 0);
++    char* tools_json = NULL;  /* 提速：禁用工具，纯 LLM 文本路径 */
++
++    syslog(LOG_INFO, "[%s] Tools disabled for speed (pure LLM)\n", TAG);
+ 
+     while (!agent_shutdown_requested()) {
+         agent_msg_t msg;
+@@ -1536,9 +1581,9 @@
+         inject_session_context(sys_prompt, ctx_size,
+             msg.channel, msg.chat_id);
+ 
+-        /* Refresh tools JSON — Node tools are dynamic */
++        /* Tools disabled — keep NULL (pure LLM path) */
+         free(tools_json);
+-        tools_json = tool_registry_get_tools_json();
++        tools_json = NULL;
+ 
+         cJSON* messages = build_messages(msg.chat_id, msg.content,
+             history_json, hist_size);
+--- a/packages/ai_agent/src/core/memory_store.c
++++ b/packages/ai_agent/src/core/memory_store.c
+@@ -99,17 +99,23 @@
+     /* Create config files with defaults */
+     const char *default_soul = 
+         "# Personality\n\n"
+-        "我是 AI Agent，运行在 Vela 嵌入式设备上的 AI 助手。\n\n"
+-        "## 行为准则\n"
+-        "- 简洁高效，回复控制在 200 字以内（除非用户要求详细）\n"
+-        "- 中文优先，用户用英文则用英文回复\n"
+-        "- 只在用户明确要求时才写文件或记笔记，不主动写\n"
+-        "- 善用工具（搜索、时间、文件），但避免不必要的工具调用\n"
+-        "- 诚实说明能力边界，不编造信息\n";
++        "You are openvela, a smart voice assistant running on an ESP32-P4 board.\n"
++        "Your owner is Aurora.\n\n"
++        "## Greeting rule\n"
++        "- When the user says 'Hello, openvela' or greets you, reply with only\n"
++        "  'Hello, Aurora', nothing more.\n\n"
++        "## Behavior\n"
++        "- Be concise, keep replies under 200 words unless asked for detail\n"
++        "- Always reply in English\n"
++        "- Do NOT call web_search, news_search or any network tool — they are\n"
++        "  not configured. Answer directly from your own knowledge.\n"
++        "- Be honest about your limits, never make up facts\n";
+ 
+     const char *default_user = 
+         "# User\n\n"
+-        "（首次使用请告诉我你的名字和偏好，我会记住）\n";
++        "- Name: Aurora\n"
++        "- Preferred language: English\n"
++        "- Interests: embedded development, concise communication\n";
+ 
+     const char *default_memory = 
+         "# Memory\n\n"
+--- a/packages/ai_agent/src/infra/vela_tls.c
++++ b/packages/ai_agent/src/infra/vela_tls.c
+@@ -110,25 +110,6 @@
+     }
+ 
+     return (size_t)(dst - buf);
+-}
+-
+-/* Check whether the raw accumulated body ends with the chunked
+- * terminator ("...\r\n0\r\n\r\n", or "0\r\n\r\n" for an empty body).
+- * Without this check the read loop below blocks on keep-alive
+- * connections until the server closes them (~60s idle timeout),
+- * tripping the agent's 60s LLM watchdog. */
+-static int chunked_end_seen(const char* buf, size_t len)
+-{
+-    static const char term_empty[] = "0\r\n\r\n";
+-    static const char term_last[] = "\r\n0\r\n\r\n";
+-    size_t n1 = sizeof(term_empty) - 1; /* 5 */
+-    size_t n2 = sizeof(term_last) - 1;  /* 7 */
+-
+-    if (len >= n2 && memcmp(buf + len - n2, term_last, n2) == 0)
+-        return 1;
+-    if (len >= n1 && memcmp(buf + len - n1, term_empty, n1) == 0)
+-        return 1;
+-    return 0;
+ }
+ 
+ /* ── TLS context ─────────────────────────────────────────────── */
+@@ -632,15 +613,11 @@
+         while (resp_pos < resp_cap - 1) {
+             if (content_length >= 0 && (long)resp_pos >= content_length)
+                 break;
+-            if (chunked && chunked_end_seen(resp_buf, resp_pos))
+-                break;
+             ret = mbedtls_ssl_read(&ctx->ssl,
+                 (unsigned char*)(resp_buf + resp_pos),
+                 resp_cap - 1 - resp_pos);
+             if (ret > 0) {
+                 resp_pos += (size_t)ret;
+-                if (chunked && chunked_end_seen(resp_buf, resp_pos))
+-                    break;
+             } else if (ret == 0 || ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
+                 break;
+             } else if (ret != MBEDTLS_ERR_SSL_WANT_READ) {
+--- a/packages/ai_agent/src/voice/audio_playback.c
++++ b/packages/ai_agent/src/voice/audio_playback.c
+@@ -1,143 +1,410 @@
+ /*
+- * Copyright (C) 2026 Xiaomi Corporation
++ * audio_playback.c - 用 NuttX 标准 audio buffer 管理播放 PCM
++ * 替代 aw-alsa-lib（Allwinner 专用，P4 上编译不过）
++ * 设备：/dev/audio/pcm0（pcm_decode -> ES8311）
+  *
+- * Licensed under the Apache License, Version 2.0 (the "License");
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *      http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
++ * 播放链路（同步阻塞）：
++ *   open  -> GETCAPS -> RESERVE -> CONFIGURE -> GETBUFFERINFO
++ *         -> REGISTERMQ -> ALLOCBUFFER xN
++ *   write : ENQUEUEBUFFER（首个 buffer 入队后 START）
++ *   stop  : STOP（驱动会把在途 buffer 全部 dequeue 回来）
++ *   close : 等播完 -> STOP -> FREEBUFFER -> UNREGISTERMQ -> RELEASE -> close
+  */
+ 
+-/* audio_playback.c - Streaming audio playback via media_player buffer mode. */
++#include <nuttx/config.h>
++#include <nuttx/audio/audio.h>
+ 
+ #include "voice/audio_playback.h"
+ #include "agent_config.h"
+ 
++#include <sys/ioctl.h>
++#include <mqueue.h>
+ #include <errno.h>
+-#include <media_player.h>
++#include <fcntl.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <syslog.h>
+ #include <unistd.h>
+-
+-static const char* TAG = "audio_pb";
+-
+-#define PB_OPTIONS_LEN 128
+-
+-static void* s_active_player;
+-
+-struct audio_playback {
+-    void* player;
++#include <time.h>
++
++static const char *TAG = "audio_pb";
++
++/* GETBUFFERINFO 失败时的兜底（CONFIG_AUDIO_DRIVER_SPECIFIC_BUFFERS 未开启时
++ * ES8311 返回 -ENOTTY）。4096B @16kHz/16bit = 128ms 音频/块。 */
++#define PB_FALLBACK_BUFFER_SIZE 4096
++#define PB_FALLBACK_NBUFFERS    4
++
++struct audio_playback
++{
++    int fd;
++    mqd_t mq;
++    char mqname[32];
++
++    struct ap_buffer_s **bufs;       /* 全部 buffer 指针（ALLOCBUFFER 分配） */
++    struct ap_buffer_s **free_stack; /* 空闲 buffer 栈（dequeue 回收） */
++    int nbuffers;
++    int buffer_size;
++    int free_count;
++
++    int started;
++    volatile int stopped;
+     size_t total_written;
+-    int bytes_per_frame;
+-    volatile int stopped;
+ };
+ 
+-audio_playback_t* audio_playback_open(const char* dev_path,
+-    unsigned int sample_rate, unsigned int channels,
+-    unsigned int bits_per_sample)
+-{
+-    (void)dev_path;
+-
+-    if (s_active_player) {
+-        syslog(LOG_WARNING, "[%s] force closing stale player\n", TAG);
+-        media_player_stop(s_active_player);
+-        media_player_close(s_active_player, 0);
+-        s_active_player = NULL;
+-        usleep(100000);
+-    }
+-
+-    void* player = media_player_open(MEDIA_STREAM_MUSIC);
+-    if (!player) {
+-        syslog(LOG_ERR, "[%s] media_player_open failed\n", TAG);
++/* 阻塞收 mq 消息，把 dequeue 回来的 buffer 压入 free_stack。
++ * 返回 0：拿到一个空闲 buffer；<0：出错或已停止。 */
++static int pb_wait_dequeue(audio_playback_t *pb)
++{
++    struct audio_msg_s msg;
++    unsigned int prio;
++
++    while (1)
++    {
++        if (pb->stopped)
++            return -ECANCELED;
++
++        ssize_t ret = mq_receive(pb->mq, (char *)&msg, sizeof(msg), &prio);
++        if (ret != sizeof(msg))
++        {
++            if (errno == EINTR)
++                continue;
++            return -EIO;
++        }
++
++        switch (msg.msg_id)
++        {
++        case AUDIO_MSG_DEQUEUE:
++            if (pb->free_count < pb->nbuffers)
++                pb->free_stack[pb->free_count++] =
++                    (struct ap_buffer_s *)msg.u.ptr;
++            return 0;
++
++        case AUDIO_MSG_STOP:
++            pb->stopped = 1;
++            return -ECANCELED;
++
++        case AUDIO_MSG_IOERR:
++            return -EIO;
++
++        case AUDIO_MSG_COMPLETE:
++        default:
++            /* 其他消息继续等 */
++            break;
++        }
++    }
++}
++
++audio_playback_t *audio_playback_open(const char *dev_path,
++                                      unsigned int sample_rate,
++                                      unsigned int channels,
++                                      unsigned int bits_per_sample)
++{
++    struct audio_caps_desc_s cap_desc;
++    struct audio_caps_s caps;
++    struct ap_buffer_info_s buf_info;
++    struct mq_attr attr;
++    int ret;
++    int i;
++
++    if (bits_per_sample != 16)
++    {
++        syslog(LOG_ERR, "[%s] unsupported bits %u\n", TAG, bits_per_sample);
+         return NULL;
+     }
+ 
+-    char opts[PB_OPTIONS_LEN];
+-    snprintf(opts, sizeof(opts),
+-        "format=s%ule:sample_rate=%u:ch_layout=%s",
+-        bits_per_sample, sample_rate,
+-        (channels == 1) ? "mono" : "stereo");
+-
+-    int ret = media_player_prepare(player, NULL, opts);
+-    if (ret < 0) {
+-        syslog(LOG_ERR, "[%s] prepare failed: %d\n", TAG, ret);
+-        media_player_close(player, 0);
++    audio_playback_t *pb = calloc(1, sizeof(*pb));
++    if (!pb)
+         return NULL;
+-    }
+-
+-    ret = media_player_start(player);
+-    if (ret < 0) {
+-        syslog(LOG_ERR, "[%s] start failed: %d\n", TAG, ret);
+-        media_player_close(player, 0);
+-        return NULL;
+-    }
+-
+-    audio_playback_t* pb = calloc(1, sizeof(*pb));
+-    if (!pb) {
+-        media_player_close(player, 0);
+-        return NULL;
+-    }
+-
+-    pb->player = player;
+-    pb->bytes_per_frame = (bits_per_sample / 8) * channels;
+-    s_active_player = player;
+-
+-    syslog(LOG_INFO, "[%s] opened (%uHz %uch %ubit)\n",
+-        TAG, sample_rate, channels, bits_per_sample);
++    pb->fd = -1;
++    pb->mq = (mqd_t)-1;
++
++    pb->fd = open(dev_path, O_RDWR | O_CLOEXEC);
++    if (pb->fd < 0)
++    {
++        syslog(LOG_ERR, "[%s] open %s failed: %d\n", TAG, dev_path, errno);
++        goto fail;
++    }
++
++    /* GETCAPS：验证支持 OUTPUT + PCM */
++    memset(&caps, 0, sizeof(caps));
++    caps.ac_len = sizeof(caps);
++    caps.ac_type = AUDIO_TYPE_QUERY;
++    caps.ac_subtype = AUDIO_TYPE_QUERY;
++    ret = ioctl(pb->fd, AUDIOIOC_GETCAPS, (unsigned long)&caps);
++    if (ret != caps.ac_len)
++    {
++        syslog(LOG_ERR, "[%s] GETCAPS failed: %d\n", TAG, ret);
++        goto fail;
++    }
++    if ((caps.ac_controls.b[0] & AUDIO_TYPE_OUTPUT) == 0 ||
++        (caps.ac_format.hw & (1 << (AUDIO_FMT_PCM - 1))) == 0)
++    {
++        syslog(LOG_ERR, "[%s] device doesn't support PCM output\n", TAG);
++        goto fail;
++    }
++
++    /* RESERVE */
++    ret = ioctl(pb->fd, AUDIOIOC_RESERVE, 0);
++    if (ret < 0)
++    {
++        syslog(LOG_ERR, "[%s] RESERVE failed: %d\n", TAG, ret);
++        goto fail;
++    }
++
++    /* CONFIGURE：16bit PCM / 采样率 / 通道 */
++    memset(&cap_desc, 0, sizeof(cap_desc));
++    cap_desc.caps.ac_len = sizeof(struct audio_caps_s);
++    cap_desc.caps.ac_type = AUDIO_TYPE_OUTPUT;
++    cap_desc.caps.ac_channels = channels;
++    cap_desc.caps.ac_chmap = 0;
++    cap_desc.caps.ac_controls.hw[0] = sample_rate;
++    cap_desc.caps.ac_controls.b[3] = sample_rate >> 16;
++    cap_desc.caps.ac_controls.b[2] = bits_per_sample;
++    cap_desc.caps.ac_subtype = AUDIO_FMT_PCM;
++    ret = ioctl(pb->fd, AUDIOIOC_CONFIGURE, (unsigned long)&cap_desc);
++    if (ret < 0)
++    {
++        syslog(LOG_ERR,
++               "[%s] CONFIGURE failed: ret=%d errno=%d (rate=%u ch=%u bits=%u)\n",
++               TAG, ret, errno, sample_rate, channels, bits_per_sample);
++        goto fail;
++    }
++
++    /* 设置音量（ES8311 默认静音，DAC_REG32=0，需显式设置音量才出声） */
++    memset(&cap_desc, 0, sizeof(cap_desc));
++    cap_desc.caps.ac_len = sizeof(struct audio_caps_s);
++    cap_desc.caps.ac_type = AUDIO_TYPE_FEATURE;
++    cap_desc.caps.ac_format.hw = AUDIO_FU_VOLUME;
++    cap_desc.caps.ac_controls.hw[0] = 800;
++    ret = ioctl(pb->fd, AUDIOIOC_CONFIGURE, (unsigned long)&cap_desc);
++    if (ret < 0)
++    {
++        syslog(LOG_WARNING, "[%s] set volume failed: %d\n", TAG, ret);
++    }
++
++    /* GETBUFFERINFO */
++    ret = ioctl(pb->fd, AUDIOIOC_GETBUFFERINFO, (unsigned long)&buf_info);
++    if (ret < 0 || buf_info.nbuffers < 2 || buf_info.buffer_size < 256)
++    {
++        buf_info.nbuffers = PB_FALLBACK_NBUFFERS;
++        buf_info.buffer_size = PB_FALLBACK_BUFFER_SIZE;
++    }
++    pb->nbuffers = buf_info.nbuffers;
++    pb->buffer_size = buf_info.buffer_size;
++
++    /* 建 mq */
++    attr.mq_maxmsg = pb->nbuffers + 8;
++    attr.mq_msgsize = sizeof(struct audio_msg_s);
++    attr.mq_curmsgs = 0;
++    attr.mq_flags = 0;
++    snprintf(pb->mqname, sizeof(pb->mqname), "/tmp/pb%p", (void *)pb);
++    pb->mq = mq_open(pb->mqname, O_RDWR | O_CREAT, 0644, &attr);
++    if (pb->mq == (mqd_t)-1)
++    {
++        syslog(LOG_ERR, "[%s] mq_open failed: %d\n", TAG, errno);
++        goto fail;
++    }
++
++    /* REGISTERMQ */
++    ret = ioctl(pb->fd, AUDIOIOC_REGISTERMQ, (unsigned long)pb->mq);
++    if (ret < 0)
++    {
++        syslog(LOG_ERR, "[%s] REGISTERMQ failed: %d\n", TAG, ret);
++        goto fail;
++    }
++
++    /* ALLOCBUFFER xN */
++    pb->bufs = calloc(pb->nbuffers, sizeof(struct ap_buffer_s *));
++    pb->free_stack = calloc(pb->nbuffers, sizeof(struct ap_buffer_s *));
++    if (!pb->bufs || !pb->free_stack)
++    {
++        syslog(LOG_ERR, "[%s] calloc buffers failed\n", TAG);
++        goto fail;
++    }
++
++    for (i = 0; i < pb->nbuffers; i++)
++    {
++        struct audio_buf_desc_s desc;
++        memset(&desc, 0, sizeof(desc));
++        desc.numbytes = pb->buffer_size;
++        desc.u.pbuffer = &pb->bufs[i];
++        ret = ioctl(pb->fd, AUDIOIOC_ALLOCBUFFER, (unsigned long)&desc);
++        if (ret < 0)
++        {
++            syslog(LOG_ERR, "[%s] ALLOCBUFFER[%d] failed: %d\n",
++                   TAG, i, ret);
++            goto fail;
++        }
++        pb->free_stack[pb->free_count++] = pb->bufs[i];
++    }
++
++    syslog(LOG_INFO,
++           "[%s] opened %s (%uHz %uch %ubit, %dx%d buffers)\n",
++           TAG, dev_path, sample_rate, channels, bits_per_sample,
++           pb->nbuffers, pb->buffer_size);
+     return pb;
++
++fail:
++    audio_playback_close(pb);
++    return NULL;
+ }
+ 
+-int audio_playback_write(audio_playback_t* pb, const void* buf, size_t len)
+-{
+-    if (!pb || !pb->player || !buf || len == 0) {
++int audio_playback_write(audio_playback_t *pb, const void *buf, size_t len)
++{
++    const uint8_t *src = (const uint8_t *)buf;
++    size_t remaining = len;
++    size_t written = 0;
++
++    if (!pb || pb->fd < 0 || !buf || len == 0)
+         return -EINVAL;
+-    }
+-
+-    if (pb->stopped) {
++    if (pb->stopped)
+         return -ECANCELED;
+-    }
+-
+-    ssize_t n = media_player_write_data(pb->player, buf, len);
+-    if (n > 0) {
+-        pb->total_written += (size_t)n;
+-    }
+-
+-    return (int)n;
++
++    while (remaining > 0)
++    {
++        struct ap_buffer_s *apb;
++        struct audio_buf_desc_s desc;
++        size_t n;
++        int ret;
++
++        if (pb->free_count == 0)
++        {
++            ret = pb_wait_dequeue(pb);
++            if (ret < 0)
++                return written > 0 ? (int)written : ret;
++        }
++
++        apb = pb->free_stack[--pb->free_count];
++
++        n = remaining < (size_t)apb->nmaxbytes
++                ? remaining : (size_t)apb->nmaxbytes;
++        memcpy(apb->samp, src, n);
++        apb->nbytes = n;
++        apb->curbyte = 0;
++        apb->flags = 0;
++
++        memset(&desc, 0, sizeof(desc));
++        desc.numbytes = n;
++        desc.u.buffer = apb;
++        ret = ioctl(pb->fd, AUDIOIOC_ENQUEUEBUFFER, (unsigned long)&desc);
++        if (ret < 0)
++        {
++            pb->free_stack[pb->free_count++] = apb;
++            syslog(LOG_ERR, "[%s] ENQUEUEBUFFER failed: %d\n", TAG, ret);
++            return written > 0 ? (int)written : -EIO;
++        }
++
++        if (!pb->started)
++        {
++            ret = ioctl(pb->fd, AUDIOIOC_START, 0);
++            if (ret < 0)
++            {
++                syslog(LOG_ERR, "[%s] START failed: %d\n", TAG, ret);
++                return written > 0 ? (int)written : -EIO;
++            }
++            pb->started = 1;
++        }
++
++        src += n;
++        remaining -= n;
++        written += n;
++    }
++
++    pb->total_written += written;
++    return (int)written;
+ }
+ 
+-void audio_playback_stop(audio_playback_t* pb)
+-{
+-    if (pb) {
+-        pb->stopped = 1;
+-        if (pb->player) {
+-            media_player_stop(pb->player);
+-        }
++void audio_playback_stop(audio_playback_t *pb)
++{
++    if (!pb)
++        return;
++
++    pb->stopped = 1;
++    if (pb->fd >= 0 && pb->started)
++    {
++        ioctl(pb->fd, AUDIOIOC_STOP, 0);
+     }
+ }
+ 
+-void audio_playback_close(audio_playback_t* pb)
+-{
+-    if (!pb) {
++void audio_playback_close(audio_playback_t *pb)
++{
++    int i;
++
++    if (!pb)
+         return;
+-    }
+-
+-    if (pb->player) {
++
++    /* 正常播完：等所有在途 buffer dequeue 回来（带超时保护） */
++    if (pb->started && !pb->stopped && pb->mq != (mqd_t)-1)
++    {
++        int timeout_ms = 5000;
++        while (pb->free_count < pb->nbuffers && timeout_ms > 0)
++        {
++            struct audio_msg_s msg;
++            struct timespec ts;
++            unsigned int prio;
++            ssize_t ret;
++
++            clock_gettime(CLOCK_REALTIME, &ts);
++            ts.tv_nsec += 100 * 1000 * 1000;
++            if (ts.tv_nsec >= 1000 * 1000 * 1000)
++            {
++                ts.tv_sec += 1;
++                ts.tv_nsec -= 1000 * 1000 * 1000;
++            }
++
++            ret = mq_timedreceive(pb->mq, (char *)&msg, sizeof(msg),
++                                  &prio, &ts);
++            if (ret == sizeof(msg) && msg.msg_id == AUDIO_MSG_DEQUEUE)
++            {
++                if (pb->free_count < pb->nbuffers)
++                    pb->free_stack[pb->free_count++] =
++                        (struct ap_buffer_s *)msg.u.ptr;
++            }
++            timeout_ms -= 100;
++        }
++    }
++
++    /* STOP 兜底（确保驱动停、在途 buffer 回收） */
++    if (pb->fd >= 0 && pb->started && !pb->stopped)
++    {
++        ioctl(pb->fd, AUDIOIOC_STOP, 0);
++    }
++
++    /* FREEBUFFER：用原始指针数组（不依赖 free_stack） */
++    if (pb->fd >= 0 && pb->bufs)
++    {
++        for (i = 0; i < pb->nbuffers; i++)
++        {
++            if (pb->bufs[i])
++            {
++                struct audio_buf_desc_s desc;
++                memset(&desc, 0, sizeof(desc));
++                desc.u.buffer = pb->bufs[i];
++                ioctl(pb->fd, AUDIOIOC_FREEBUFFER, (unsigned long)&desc);
++            }
++        }
++    }
++
++    /* UNREGISTERMQ + RELEASE + close */
++    if (pb->fd >= 0)
++    {
++        if (pb->mq != (mqd_t)-1)
++            ioctl(pb->fd, AUDIOIOC_UNREGISTERMQ, (unsigned long)pb->mq);
++        ioctl(pb->fd, AUDIOIOC_RELEASE, 0);
+         syslog(LOG_INFO, "[%s] closing (%zu bytes written)\n",
+-            TAG, pb->total_written);
+-        media_player_stop(pb->player);
+-        usleep(50 * 1000);
+-        media_player_close(pb->player, 0);
+-        s_active_player = NULL;
+-    }
+-
++               TAG, pb->total_written);
++        close(pb->fd);
++    }
++
++    if (pb->mq != (mqd_t)-1)
++    {
++        mq_close(pb->mq);
++        mq_unlink(pb->mqname);
++    }
++
++    free(pb->free_stack);
++    free(pb->bufs);
+     free(pb);
+ }
+ 
+--- a/packages/ai_agent/src/voice/voice_channel.c
++++ b/packages/ai_agent/src/voice/voice_channel.c
+@@ -29,7 +29,9 @@
+ #include "voice/voice_asr.h"
+ #include "voice/voice_tts.h"
+ #include "voice/volc_asr.h"
++#include "voice/mimo_asr.h"
+ #include "voice/volc_tts.h"
++#include "voice/mimo_tts.h"
+ 
+ #include <ctype.h>
+ #include <errno.h>
+@@ -603,6 +605,8 @@
+     if (!s_backends_registered) {
+         volc_tts_register();
+         volc_asr_register();
++        mimo_asr_register();
++        mimo_tts_register();
+         s_backends_registered = 1;
+     }
+ 
+@@ -1135,6 +1139,19 @@
+     }
+ 
+     ret = write_pcm_file(out_path, pcm, pcm_len);
++
++    /* 播放到喇叭（验证出声） */
++    audio_playback_t* pb = audio_playback_open(
++        AGENT_AUDIO_PLAYBACK_DEV, AGENT_VOICE_SAMPLE_RATE,
++        AGENT_VOICE_CHANNELS, AGENT_VOICE_BITS);
++    if (pb) {
++        audio_playback_write(pb, pcm, pcm_len);
++        audio_playback_close(pb);
++        printf("TTS played to speaker (%zu bytes)\n", pcm_len);
++    } else {
++        printf("playback open failed\n");
++    }
++
+     free(pcm);
+ 
+     if (ret == 0) {

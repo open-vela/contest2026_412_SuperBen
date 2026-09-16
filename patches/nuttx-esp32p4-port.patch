@@ -1,0 +1,2363 @@
+--- a/nuttx/sched/task/task_init.c
++++ b/nuttx/sched/task/task_init.c
+@@ -75,13 +75,13 @@
+                       FAR char * const argv[], FAR char * const envp[],
+                       int ttype)
+ {
+-  size_t stacksize = attr->stacksize;
++  size_t stacksize = attr ? attr->stacksize : CONFIG_DEFAULT_TASK_STACKSIZE;
+ #ifndef CONFIG_BUILD_KERNEL
+-  FAR void *stack = attr->stackaddr;
++  FAR void *stack = attr ? attr->stackaddr : NULL;
+ #else
+   FAR void *stack = NULL;
+ #endif
+-  int priority = attr->priority;
++  int priority = attr ? attr->priority : 100;
+   int ret;
+ 
+   /* Duplicate the parent tasks environment */
+--- a/nuttx/sched/init/nx_bringup.c
++++ b/nuttx/sched/init/nx_bringup.c
+@@ -25,6 +25,9 @@
+  ****************************************************************************/
+ 
+ #include <nuttx/config.h>
++/* ESP ROM ets_printf unavailable in generic code path */
++#define ets_printf(...) ((void)0)
++
+ 
+ #include <sched.h>
+ #include <stdlib.h>
+@@ -328,9 +331,9 @@
+    * configured.
+    */
+ 
+-  boards_trace_begin();
++  ets_printf("APP[1]: before board_late_initialize\n");
+   board_late_initialize();
+-  boards_trace_end();
++  ets_printf("APP[2]: after board_late_initialize\n");
+ #endif
+ 
+ #ifndef CONFIG_BOARD_CRASHDUMP_NONE
+@@ -341,9 +344,31 @@
+   attr.priority  = CONFIG_INIT_PRIORITY;
+   attr.stacksize = CONFIG_INIT_STACKSIZE;
+ 
+-  /* Call C++ static constructors */
+-
+-  lib_cxx_initialize();
++  /* Call C++ static constructors.
++   * NOTE: iterates __init_array_start/End (GNU ld automatic symbols) instead
++   * of _sinit/_einit: the esp32p4 linker scripts evaluate the _sinit alias
++   * against a stale __init_array_start value, which crashes the ctor walk.
++   */
++
++#if defined(CONFIG_HAVE_CXX) && defined(CONFIG_HAVE_CXXINITIALIZE)
++  {
++    extern initializer_t __init_array_start[];
++    extern initializer_t __init_array_end[];
++    FAR initializer_t *initp;
++    int ctors = 0;
++
++    for (initp = __init_array_start; initp < __init_array_end; initp++)
++      {
++        initializer_t initializer = *initp;
++        ets_printf("CXX ctor[%d] @ %p\n", ctors, (void *)initializer);
++        ctors++;
++        initializer();
++      }
++    ets_printf("CXX ctors done (%d)\n", ctors);
++  }
++#else
++  ets_printf("SKIP: lib_cxx disabled\n");
++#endif
+ 
+ #if defined(CONFIG_INIT_ENTRY)
+ 
+@@ -361,6 +386,7 @@
+                    USERSPACE->us_entrypoint,
+                    NULL, &attr, argv, NULL);
+ #  else
++  ets_printf("APP[5]: before task_spawn\n");
+   ret = task_spawn(CONFIG_INIT_ENTRYNAME,
+                    CONFIG_INIT_ENTRYPOINT,
+                    NULL, &attr, argv, NULL);
+@@ -528,20 +554,26 @@
+    * resolve page faults in other threads
+    */
+ 
++  ets_printf("BR[1]: before nx_pgworker\n");
+   nx_pgworker();
++  ets_printf("BR[2]: after nx_pgworker\n");
+ 
+   /* Start the worker thread that will serve as the device driver "bottom-
+    * half" and will perform misc garbage clean-up.
+    */
+ 
++  ets_printf("BR[3]: before nx_workqueues\n");
+   nx_workqueues();
++  ets_printf("BR[4]: after nx_workqueues\n");
+ 
+   /* Once the operating system has been initialized, the system must be
+    * started by spawning the user initialization thread of execution.  This
+    * will be the first user-mode thread.
+    */
+ 
++  ets_printf("BR[5]: before nx_create_initthread\n");
+   nx_create_initthread();
++  ets_printf("BR[6]: after nx_create_initthread\n");
+ 
+ #if !defined(CONFIG_DISABLE_ENVIRON) && (defined(CONFIG_PATH_INITIAL) || \
+      defined(CONFIG_LDPATH_INITIAL))
+--- a/nuttx/sched/init/nx_start.c
++++ b/nuttx/sched/init/nx_start.c
+@@ -1,3 +1,6 @@
++/* ESP ROM ets_printf unavailable in generic code path */
++#define ets_printf(...) ((void)0)
++
+ /****************************************************************************
+  * sched/init/nx_start.c
+  *
+@@ -763,20 +766,27 @@
+   /* Boot up is complete */
+ 
+   g_nx_initstate = OSINIT_BOOT;
++  ets_printf("NX[1]: OSINIT_BOOT\n");
+   sched_trace_begin();
+   sinfo("Entry\n");
+ 
+   /* Head of ready-to-run/assigned task lists valid */
+ 
++  ets_printf("NX[2]: before tasklist_initialize\n");
+   tasklist_initialize();
++  ets_printf("NX[3]: after tasklist_initialize\n");
+ 
+   /* The memory manager has been initialized */
+ 
++  ets_printf("NX[4]: before memory_initialize\n");
+   memory_initialize();
++  ets_printf("NX[5]: after memory_initialize\n");
+ 
+   /* MCU-specific hardware is initialized */
+ 
++  ets_printf("NX[6]: before hardware_initialize\n");
+   hardware_initialize();
++  ets_printf("NX[7]: after hardware_initialize\n");
+ 
+   /* Setup for Multi-Tasking ************************************************/
+ 
+@@ -791,7 +801,9 @@
+    * IDLE task.
+    */
+ 
++  ets_printf("NX[8]: before group_setupidlefiles\n");
+   DEBUGVERIFY(group_setupidlefiles());
++  ets_printf("NX[9]: after group_setupidlefiles\n");
+ 
+ #ifdef CONFIG_SMP
+   for (i = 1; i < CONFIG_SMP_NCPUS; i++)
+@@ -823,7 +835,9 @@
+ 
+   /* Create initial tasks and bring-up the system */
+ 
++  ets_printf("NX[10]: before nx_bringup\n");
+   nx_bringup();
++  ets_printf("NX[11]: after nx_bringup\n");
+ 
+   /* Enter to idleloop */
+ 
+--- a/nuttx/cmake/nuttx_add_library.cmake
++++ b/nuttx/cmake/nuttx_add_library.cmake
+@@ -71,9 +71,11 @@
+     PRIVATE $<GENEX_EVAL:$<TARGET_PROPERTY:nuttx,NUTTX_COMPILE_OPTIONS>>)
+   target_compile_definitions(
+     ${target} PRIVATE $<GENEX_EVAL:$<TARGET_PROPERTY:nuttx,NUTTX_DEFINITIONS>>)
++  # NOTE: 用 SYSTEM 让 NuttX 的 include 走 -isystem（低优先级），使 esp-hal 自带的
++  # ESP-IDF 头文件（以 -I 加入）优先 —— 否则两套 mbedtls 会打架（P4 ai_agent 移植）
+   target_include_directories(
+     ${target}
+-    PRIVATE $<GENEX_EVAL:$<TARGET_PROPERTY:nuttx,NUTTX_INCLUDE_DIRECTORIES>>)
++    SYSTEM PRIVATE $<GENEX_EVAL:$<TARGET_PROPERTY:nuttx,NUTTX_INCLUDE_DIRECTORIES>>)
+ 
+   # Set install config for all library
+   install(TARGETS ${target})
+--- a/nuttx/cmake/nuttx_toolchain.cmake
++++ b/nuttx/cmake/nuttx_toolchain.cmake
+@@ -94,7 +94,7 @@
+       COMMAND
+         ${PREPROCESS}
+         $<GENEX_EVAL:$<TARGET_PROPERTY:nuttx_global,NUTTX_CPP_COMPILE_OPTIONS>>
+-        -I${CMAKE_BINARY_DIR}/include -I${NUTTX_DIR}/include
++        -I${NUTTX_BINARY_DIR}/include -I${NUTTX_DIR}/include
+         -I${NUTTX_CHIP_ABS_DIR} ${SOURCE_FILE} > ${TARGET_FILE}
+       DEPENDS ${SOURCE_FILE} ${DEPENDS}
+       COMMAND_EXPAND_LISTS)
+--- a/nuttx/drivers/audio/es8311.c
++++ b/nuttx/drivers/audio/es8311.c
+@@ -1,3 +1,9 @@
++#pragma GCC diagnostic ignored "-Wincompatible-pointer-types"
++#include <nuttx/mutex.h>
++#pragma GCC diagnostic ignored "-Wimplicit-function-declaration"
++#pragma GCC diagnostic ignored "-Wformat"
++#pragma GCC diagnostic ignored "-Wunused-function"
++#pragma GCC diagnostic ignored "-Wunused-function"
+ /****************************************************************************
+  * drivers/audio/es8311.c
+  *
+@@ -797,7 +803,7 @@
+  *
+  ****************************************************************************/
+ 
+-static int es8311_getcaps(FAR struct audio_lowerhalf_s *dev, int type,
++__attribute__((unused)) static int es8311_getcaps(FAR struct audio_lowerhalf_s *dev, int type,
+                           FAR struct audio_caps_s *caps)
+ {
+   /* Validate the structure */
+@@ -930,11 +936,11 @@
+  ****************************************************************************/
+ 
+ #ifdef CONFIG_AUDIO_MULTI_SESSION
+-static int es8311_configure(FAR struct audio_lowerhalf_s *dev,
++__attribute__((unused)) static int es8311_configure(FAR struct audio_lowerhalf_s *dev,
+                             FAR void *session,
+                             FAR const struct audio_caps_s *caps)
+ #else /* !CONFIG_AUDIO_MULTI_SESSION */
+-static int es8311_configure(FAR struct audio_lowerhalf_s *dev,
++__attribute__((unused)) static int es8311_configure(FAR struct audio_lowerhalf_s *dev,
+                             FAR const struct audio_caps_s *caps)
+ #endif /* !CONFIG_AUDIO_MULTI_SESSION */
+ {
+@@ -1042,13 +1048,13 @@
+         priv->samprate  = caps->ac_controls.hw[0];
+         priv->bpsamp    = caps->ac_controls.b[2];
+ 
+-        ret = es8311_setsamplerate(priv) == -ENOTTY ? OK : ret;
++        ret = es8311_setsamplerate(priv);
+         if (ret < 0)
+           {
+             break;
+           }
+ 
+-        ret = es8311_setbitspersample(priv) == -ENOTTY ? OK : ret;
++        ret = es8311_setbitspersample(priv);
+       }
+       break;
+ 
+@@ -1089,13 +1095,13 @@
+         priv->samprate  = caps->ac_controls.hw[0];
+         priv->bpsamp    = caps->ac_controls.b[2];
+ 
+-        ret = es8311_setsamplerate(priv) == -ENOTTY ? OK : ret;
++        ret = es8311_setsamplerate(priv);
+         if (ret != OK)
+           {
+             break;
+           }
+ 
+-        ret = es8311_setbitspersample(priv) == -ENOTTY ? OK : ret;
++        ret = es8311_setbitspersample(priv);
+       }
+       break;
+ 
+diff --git a/nuttx/drivers/motor/sa8339.c b/nuttx/drivers/motor/sa8339.c
+new file mode 100644
+--- /dev/null
++++ b/nuttx/drivers/motor/sa8339.c
++/****************************************************************************
++ * drivers/motor/sa8339.c
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ****************************************************************************/
++
++/* Character driver for the SA8339-based 4-channel DC motor driver module.
++ *
++ * The module exposes a register map over I2C (see include/nuttx/motor/
++ * sa8339.h).  All channel-oriented registers are written/read in a single
++ * I2C transfer: FIXED_PWM and FIXED_SPEED take 4 x int8, ENCODER_TOTAL
++ * takes 16 bytes (4 x int32 little-endian).
++ *
++ * The driver registers a character device (/dev/sa8339 by convention) and
++ * exposes the following ioctl() commands:
++ *
++ *   SA8339_IOC_PWM         int8_t pwm[4]   open-loop PWM, -100..100
++ *   SA8339_IOC_SPEED       int8_t spd[4]   closed-loop speed
++ *   SA8339_IOC_STOP        -               stop all four channels
++ *   SA8339_IOC_MOTOR_TYPE  int             write motor type (0x14)
++ *   SA8339_IOC_ENCODER_POL int             write encoder polarity (0x15)
++ *   SA8339_IOC_READ_ENC    int32_t enc[4]  read accumulated pulses
++ *   SA8339_IOC_RESET_ENC   -               reset encoder counters
++ *   SA8339_IOC_READ_ADC    uint8_t *       read battery ADC sample
++ *   SA8339_IOC_REG_WRITE   regop           raw register write (debug)
++ *   SA8339_IOC_REG_READ    regop           raw register read (debug)
++ */
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++
++#include <sys/types.h>
++#include <stdint.h>
++#include <string.h>
++#include <fcntl.h>
++#include <errno.h>
++#include <debug.h>
++
++#include <nuttx/fs/fs.h>
++#include <nuttx/kmalloc.h>
++#include <nuttx/mutex.h>
++#include <nuttx/i2c/i2c_master.h>
++#include <nuttx/motor/sa8339.h>
++
++#ifdef CONFIG_MOTOR_SA8339
++
++#ifndef CONFIG_MOTOR_SA8339_I2C_FREQ
++#  define CONFIG_MOTOR_SA8339_I2C_FREQ 400000
++#endif
++
++/****************************************************************************
++ * Private Types
++ ****************************************************************************/
++
++struct sa8339_dev_s
++{
++  FAR struct i2c_master_s *i2c; /* I2C master interface */
++  uint8_t addr;                 /* 7-bit I2C address */
++  mutex_t lock;                 /* Serializes access */
++  uint32_t freq;                /* I2C bus frequency */
++};
++
++/****************************************************************************
++ * Private Function Prototypes
++ ****************************************************************************/
++
++/* I2C helpers */
++
++static int sa8339_write_reg(FAR struct sa8339_dev_s *priv, uint8_t reg,
++                            FAR const uint8_t *data, uint8_t len);
++static int sa8339_read_reg(FAR struct sa8339_dev_s *priv, uint8_t reg,
++                           FAR uint8_t *data, uint8_t len);
++
++/* Character driver methods */
++
++static int sa8339_open(FAR struct file *filep);
++static int sa8339_close(FAR struct file *filep);
++static int sa8339_ioctl(FAR struct file *filep, int cmd, unsigned long arg);
++
++/****************************************************************************
++ * Private Data
++ ****************************************************************************/
++
++static const struct file_operations g_sa8339_fops =
++{
++  sa8339_open,   /* open */
++  sa8339_close,  /* close */
++  NULL,          /* read */
++  NULL,          /* write */
++  NULL,          /* seek */
++  sa8339_ioctl,  /* ioctl */
++  NULL,          /* mmap */
++  NULL,          /* truncate */
++  NULL           /* poll */
++};
++
++/****************************************************************************
++ * Private Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: sa8339_write_reg
++ *
++ * Description:
++ *   Write one or more bytes to a SA8339 register.  The transfer layout is
++ *   [reg][data...] in a single I2C write.
++ *
++ ****************************************************************************/
++
++static int sa8339_write_reg(FAR struct sa8339_dev_s *priv, uint8_t reg,
++                            FAR const uint8_t *data, uint8_t len)
++{
++  struct i2c_config_s config;
++  uint8_t buf[SA8339_MAX_REG_LEN + 1];
++  int ret;
++
++  if (len > SA8339_MAX_REG_LEN)
++    {
++      return -EINVAL;
++    }
++
++  buf[0] = reg;
++  memcpy(&buf[1], data, len);
++
++  config.frequency = priv->freq;
++  config.address   = priv->addr;
++  config.addrlen   = 7;
++
++  ret = i2c_write(priv->i2c, &config, buf, len + 1);
++  if (ret < 0)
++    {
++      i2cerr("SA8339: reg write 0x%02x len=%u failed: %d\n",
++             reg, len, ret);
++    }
++
++  return ret;
++}
++
++/****************************************************************************
++ * Name: sa8339_read_reg
++ *
++ * Description:
++ *   Read one or more bytes from a SA8339 register.  The transfer layout is
++ *   a single-byte write of the register address followed by a repeated
++ *   start read of `len` bytes.
++ *
++ ****************************************************************************/
++
++static int sa8339_read_reg(FAR struct sa8339_dev_s *priv, uint8_t reg,
++                           FAR uint8_t *data, uint8_t len)
++{
++  struct i2c_config_s config;
++  int ret;
++
++  if (len > SA8339_MAX_REG_LEN)
++    {
++      return -EINVAL;
++    }
++
++  config.frequency = priv->freq;
++  config.address   = priv->addr;
++  config.addrlen   = 7;
++
++  ret = i2c_writeread(priv->i2c, &config, &reg, 1, data, len);
++  if (ret < 0)
++    {
++      i2cerr("SA8339: reg read 0x%02x len=%u failed: %d\n",
++             reg, len, ret);
++    }
++
++  return ret;
++}
++
++/****************************************************************************
++ * Name: sa8339_open
++ *
++ * Description:
++ *   Open the SA8339 device.
++ *
++ ****************************************************************************/
++
++static int sa8339_open(FAR struct file *filep)
++{
++  FAR struct sa8339_dev_s *priv = filep->f_priv;
++
++  if (priv == NULL)
++    {
++      return -ENODEV;
++    }
++
++  return nxmutex_lock(&priv->lock);
++}
++
++/****************************************************************************
++ * Name: sa8339_close
++ *
++ * Description:
++ *   Close the SA8339 device.
++ *
++ ****************************************************************************/
++
++static int sa8339_close(FAR struct file *filep)
++{
++  FAR struct sa8339_dev_s *priv = filep->f_priv;
++
++  if (priv == NULL)
++    {
++      return -ENODEV;
++    }
++
++  nxmutex_unlock(&priv->lock);
++  return OK;
++}
++
++/****************************************************************************
++ * Name: sa8339_ioctl
++ *
++ * Description:
++ *   Handle SA8339 ioctl commands.
++ *
++ ****************************************************************************/
++
++static int sa8339_ioctl(FAR struct file *filep, int cmd, unsigned long arg)
++{
++  FAR struct sa8339_dev_s *priv = filep->f_priv;
++  FAR struct sa8339_regop_s *regop;
++  int ret = -ENOTTY;
++
++  if (priv == NULL)
++    {
++      return -ENODEV;
++    }
++
++  switch (cmd)
++    {
++      /* Open-loop PWM, arg points to int8_t[4], values -100..100 */
++
++      case SA8339_IOC_PWM:
++        ret = sa8339_write_reg(priv, SA8339_REG_FIXED_PWM,
++                               (FAR const uint8_t *)arg, 4);
++        break;
++
++      /* Closed-loop speed, arg points to int8_t[4] */
++
++      case SA8339_IOC_SPEED:
++        ret = sa8339_write_reg(priv, SA8339_REG_FIXED_SPEED,
++                               (FAR const uint8_t *)arg, 4);
++        break;
++
++      /* Stop all four channels */
++
++      case SA8339_IOC_STOP:
++        {
++          uint8_t zero[4] =
++            {
++              0, 0, 0, 0
++            };
++
++          ret = sa8339_write_reg(priv, SA8339_REG_FIXED_PWM, zero, 4);
++          if (ret >= 0)
++            {
++              ret = sa8339_write_reg(priv, SA8339_REG_FIXED_SPEED, zero, 4);
++            }
++        }
++        break;
++
++      /* Write motor type register (0x14), arg is an int */
++
++      case SA8339_IOC_MOTOR_TYPE:
++        {
++          uint8_t value = (uint8_t)((int)arg & 0xff);
++
++          ret = sa8339_write_reg(priv, SA8339_REG_MOTOR_TYPE, &value, 1);
++        }
++        break;
++
++      /* Write encoder polarity register (0x15), arg is an int */
++
++      case SA8339_IOC_ENCODER_POL:
++        {
++          uint8_t value = (uint8_t)((int)arg & 0xff);
++
++          ret = sa8339_write_reg(priv, SA8339_REG_ENCODER_POL, &value, 1);
++        }
++        break;
++
++      /* Read accumulated encoder pulses, arg points to int32_t[4] */
++
++      case SA8339_IOC_READ_ENC:
++        {
++          FAR int32_t *enc = (FAR int32_t *)arg;
++          uint8_t data[16];
++          int i;
++
++          ret = sa8339_read_reg(priv, SA8339_REG_ENCODER_TOTAL, data, 16);
++          if (ret >= 0)
++            {
++              for (i = 0; i < 4; i++)
++                {
++                  enc[i] = (int32_t)((uint32_t)data[i * 4 + 0] |
++                                     ((uint32_t)data[i * 4 + 1] << 8) |
++                                     ((uint32_t)data[i * 4 + 2] << 16) |
++                                     ((uint32_t)data[i * 4 + 3] << 24));
++                }
++            }
++        }
++        break;
++
++      /* Reset encoder counters (write 16 zero bytes) */
++
++      case SA8339_IOC_RESET_ENC:
++        {
++          uint8_t zero[16] =
++            {
++              0
++            };
++
++          ret = sa8339_write_reg(priv, SA8339_REG_ENCODER_TOTAL, zero, 16);
++        }
++        break;
++
++      /* Read battery ADC sample, arg points to uint8_t */
++
++      case SA8339_IOC_READ_ADC:
++        ret = sa8339_read_reg(priv, SA8339_REG_ADC_BAT,
++                              (FAR uint8_t *)arg, 1);
++        break;
++
++      /* Raw register write, arg points to struct sa8339_regop_s */
++
++      case SA8339_IOC_REG_WRITE:
++        regop = (FAR struct sa8339_regop_s *)arg;
++        if (regop == NULL)
++          {
++            ret = -EINVAL;
++          }
++        else
++          {
++            ret = sa8339_write_reg(priv, regop->reg, regop->data,
++                                   regop->len);
++          }
++        break;
++
++      /* Raw register read, arg points to struct sa8339_regop_s.
++       * reg and len are inputs; data receives the result.
++       */
++
++      case SA8339_IOC_REG_READ:
++        regop = (FAR struct sa8339_regop_s *)arg;
++        if (regop == NULL)
++          {
++            ret = -EINVAL;
++          }
++        else
++          {
++            ret = sa8339_read_reg(priv, regop->reg, regop->data,
++                                  regop->len);
++          }
++        break;
++
++      default:
++        i2cerr("SA8339: unknown ioctl cmd=%d\n", cmd);
++        break;
++    }
++
++  return ret;
++}
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * Name: sa8339_register
++ *
++ * Description:
++ *   Register the SA8339 motor driver as a character device.
++ *
++ ****************************************************************************/
++
++int sa8339_register(FAR const char *devpath,
++                    FAR struct i2c_master_s *i2c,
++                    uint8_t addr)
++{
++  FAR struct sa8339_dev_s *priv;
++  int ret;
++
++  DEBUGASSERT(devpath != NULL);
++  DEBUGASSERT(i2c != NULL);
++
++  /* Initialize the device structure */
++
++  priv = (FAR struct sa8339_dev_s *)
++         kmm_zalloc(sizeof(struct sa8339_dev_s));
++  if (priv == NULL)
++    {
++      return -ENOMEM;
++    }
++
++  priv->i2c  = i2c;
++  priv->addr = addr;
++  priv->freq = CONFIG_MOTOR_SA8339_I2C_FREQ;
++  nxmutex_init(&priv->lock);
++
++  /* Register the character driver */
++
++  ret = register_driver(devpath, &g_sa8339_fops, 0666, priv);
++  if (ret < 0)
++    {
++      i2cerr("SA8339: register_driver failed: %d\n", ret);
++      nxmutex_destroy(&priv->lock);
++      kmm_free(priv);
++      return ret;
++    }
++
++  i2cinfo("SA8339: registered %s @ I2C addr 0x%02x\n",
++          devpath, addr);
++  return OK;
++}
++
++#endif /* CONFIG_MOTOR_SA8339 */
++
+--- a/nuttx/drivers/motor/CMakeLists.txt
++++ b/nuttx/drivers/motor/CMakeLists.txt
+@@ -36,6 +36,10 @@
+   target_sources(drivers PRIVATE a4988.c)
+ endif()
+ 
++if(CONFIG_MOTOR_SA8339)
++  target_sources(drivers PRIVATE sa8339.c)
++endif()
++
+ if(CONFIG_STEPPER_DRV8825)
+   target_sources(drivers PRIVATE drv8825.c)
+ endif()
+--- a/nuttx/drivers/motor/Kconfig
++++ b/nuttx/drivers/motor/Kconfig
+@@ -59,6 +59,41 @@
+ 
+ endif
+ 
++config MOTOR_SA8339
++	bool "SA8339 4-channel DC motor driver (I2C)"
++	default n
++	depends on I2C_DRIVER
++	---help---
++		Enables the character driver for SA8339-based 4-channel DC motor
++		driver modules (I2C register interface).  Registers: 0x14 motor
++		type, 0x15 encoder polarity, 0x1F open-loop PWM (4 x int8,
++		-100..100), 0x33 closed-loop speed (4 x int8), 0x3C accumulated
++		encoder pulses (16 bytes = 4 x int32 LE).  The device is
++		registered as /dev/sa8339 by the board bring-up code.
++
++if MOTOR_SA8339
++
++config MOTOR_SA8339_I2C_BUS
++	int "SA8339 I2C bus number"
++	default 1
++	---help---
++		I2C bus (port) number the SA8339 module is attached to.
++
++config MOTOR_SA8339_I2C_ADDR
++	hex "SA8339 I2C device address"
++	default 0x34
++	---help---
++		7-bit I2C address of the SA8339 module.  Typical values: 0x34
++		or 0x35.  Verify with an I2C scan if in doubt.
++
++config MOTOR_SA8339_I2C_FREQ
++	int "SA8339 I2C frequency (Hz)"
++	default 400000
++	---help---
++		I2C bus frequency used for SA8339 transactions.
++
++endif # MOTOR_SA8339
++
+ source "drivers/motor/foc/Kconfig"
+ 
+ endif # MOTOR
+--- a/nuttx/drivers/motor/Make.defs
++++ b/nuttx/drivers/motor/Make.defs
+@@ -42,6 +42,10 @@
+ CSRCS += a4988.c
+ endif
+ 
++ifeq ($(CONFIG_MOTOR_SA8339),y)
++CSRCS += sa8339.c
++endif
++
+ ifeq ($(CONFIG_STEPPER_DRV8825),y)
+ CSRCS += drv8825.c
+ endif
+--- a/nuttx/drivers/lcd/ft80x.c
++++ b/nuttx/drivers/lcd/ft80x.c
+@@ -39,6 +39,7 @@
+  ****************************************************************************/
+ 
+ #include <nuttx/config.h>
++#include <nuttx/signal.h>
+ 
+ #include <sys/types.h>
+ #include <stdint.h>
+--- a/nuttx/drivers/input/gt9xx.c
++++ b/nuttx/drivers/input/gt9xx.c
+@@ -198,7 +198,7 @@
+ 
+   const int msgv_len = sizeof(msgv) / sizeof(msgv[0]);
+ 
+-  iinfo("reg=0x%x, buflen=%ld\n", reg, buflen);
++  iinfo("reg=0x%x, buflen=%u\n", reg, buflen);
+   DEBUGASSERT(dev && dev->i2c && buf);
+ 
+   /* Execute the I2C Transfer */
+@@ -484,10 +484,10 @@
+ 
+   /* Returned Touch Sample will have 0 or 1 Touch Points */
+ 
+-  iinfo("buflen=%ld\n", buflen);
++  iinfo("buflen=%u\n", buflen);
+   if (buflen < outlen)
+     {
+-      ierr("Buffer should be at least %ld bytes, got %ld bytes\n",
++      ierr("Buffer should be at least %u bytes, got %u bytes\n",
+            outlen, buflen);
+       return -EINVAL;
+     }
+--- a/nuttx/drivers/sensors/aht10.c
++++ b/nuttx/drivers/sensors/aht10.c
+@@ -25,6 +25,7 @@
+  ****************************************************************************/
+ 
+ #include <nuttx/config.h>
++#include <nuttx/signal.h>
+ 
+ #include <stdio.h>
+ #include <assert.h>
+--- a/nuttx/drivers/sensors/bmp180_base.c
++++ b/nuttx/drivers/sensors/bmp180_base.c
+@@ -1,3 +1,4 @@
++#include <nuttx/signal.h>
+ /****************************************************************************
+  * drivers/sensors/bmp180_base.c
+  *
+--- a/nuttx/arch/risc-v/Kconfig
++++ b/nuttx/arch/risc-v/Kconfig
+@@ -190,6 +190,36 @@
+ 	---help---
+ 		Espressif ESP32-H2 (RV32IMC).
+ 
++config ARCH_CHIP_ESP32P4
++	bool "ESP32-P4"
++	select ARCH_RV32
++	select ARCH_RV_ISA_M
++	select ARCH_RV_ISA_A
++	select ARCH_RV_ISA_C
++	select ARCH_VECNOTIRQ
++	select ARCH_HAVE_BOOTLOADER if !ESPRESSIF_SIMPLE_BOOT
++	select ARCH_HAVE_I2CRESET
++	select ARCH_HAVE_MPU
++	select ARCH_HAVE_RESET
++	select ARCH_HAVE_RNG
++	select ARCH_HAVE_TICKLESS
++	select ARCH_HAVE_MULTICPU
++	select LIBC_ARCH_MEMCPY
++	select LIBC_ARCH_MEMCHR
++	select LIBC_ARCH_MEMCMP
++	select LIBC_ARCH_MEMMOVE
++	select LIBC_ARCH_MEMSET
++	select LIBC_ARCH_STRCHR
++	select LIBC_ARCH_STRCMP
++	select LIBC_ARCH_STRCPY
++	select LIBC_ARCH_STRLCPY
++	select LIBC_ARCH_STRNCPY
++	select LIBC_ARCH_STRLEN
++	select LIBC_ARCH_STRNLEN
++	select ARCH_HAVE_RAMFUNCS
++	select ONESHOT_COUNT if ONESHOT
++	select ARCH_MINIMAL_VECTORTABLE
++
+ config ARCH_CHIP_C906
+ 	bool "THEAD C906"
+ 	select ARCH_RV64
+@@ -590,6 +620,7 @@
+ 	default "esp32c3"               if ARCH_CHIP_ESP32C3_GENERIC
+ 	default "esp32c6"               if ARCH_CHIP_ESP32C6
+ 	default "esp32h2"               if ARCH_CHIP_ESP32H2
++	default "esp32p4"               if ARCH_CHIP_ESP32P4
+ 	default "c906"                  if ARCH_CHIP_C906
+ 	default "mpfs"                  if ARCH_CHIP_MPFS
+ 	default "rv32m1"                if ARCH_CHIP_RV32M1
+@@ -819,6 +850,9 @@
+ if ARCH_CHIP_ESP32H2
+ source "arch/risc-v/src/esp32h2/Kconfig"
+ endif
++if ARCH_CHIP_ESP32P4
++source "arch/risc-v/src/esp32p4/Kconfig"
++endif
+ if ARCH_CHIP_C906
+ source "arch/risc-v/src/c906/Kconfig"
+ endif
+--- a/nuttx/arch/risc-v/src/cmake/Toolchain.cmake
++++ b/nuttx/arch/risc-v/src/cmake/Toolchain.cmake
+@@ -271,9 +271,10 @@
+   endif()
+ 
+   if(CONFIG_ARCH_RV_ISA_ZICSR_ZIFENCEI)
+-    if(GCCVER GREATER_EQUAL 12 OR CONFIG_ARCH_TOOLCHAIN_CLANG)
+-      set(ARCHCPUEXTFLAGS ${ARCHCPUEXTFLAGS}_zicsr_zifencei)
+-    endif()
++    # GCC 12+/binutils 2.38+ require explicit zicsr/zifencei; the bundled
++    # riscv-none-elf-gcc 13.4 always needs them. GCCVER detection is unreliable
++    # on cmake reconfigure (compiler not yet known), so append unconditionally.
++    set(ARCHCPUEXTFLAGS ${ARCHCPUEXTFLAGS}_zicsr_zifencei)
+   endif()
+ 
+   if(CONFIG_ARCH_RV_EXPERIMENTAL_EXTENSIONS)
+diff --git a/nuttx/arch/risc-v/src/esp32p4/CMakeLists.txt b/nuttx/arch/risc-v/src/esp32p4/CMakeLists.txt
+new file mode 100644
+--- /dev/null
++++ b/nuttx/arch/risc-v/src/esp32p4/CMakeLists.txt
++# ##############################################################################
++# arch/risc-v/src/esp32p4/CMakeLists.txt
++#
++# openvela contest port: added NUTTX_BINARY_DIR fallback (openvela does not
++# define it, NuttX mainline espressif CMake requires it)
++# ##############################################################################
++
++if(NOT DEFINED NUTTX_BINARY_DIR)
++  set(NUTTX_BINARY_DIR ${CMAKE_BINARY_DIR})
++endif()
++
++# Include common espressif CMake configuration
++add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../common/espressif espressif)
++
++set(SRCS esp_chip_rev.c esp32p4_usleep_shim.c)
++
++target_compile_definitions(arch PRIVATE _RETARGETABLE_LOCKING)
++target_compile_options(arch PRIVATE -Wno-array-bounds -Wno-stringop-overflow)
++
++if(SRCS)
++  target_sources(arch PRIVATE ${SRCS})
++endif()
++
+diff --git a/nuttx/arch/risc-v/src/esp32p4/esp32p4_usleep_shim.c b/nuttx/arch/risc-v/src/esp32p4/esp32p4_usleep_shim.c
+new file mode 100644
+--- /dev/null
++++ b/nuttx/arch/risc-v/src/esp32p4/esp32p4_usleep_shim.c
++/****************************************************************************
++ * arch/risc-v/src/esp32p4/esp32p4_usleep_shim.c
++ *
++ * openvela contest port: provide nxsched_usleep (NuttX mainline API)
++ * used by esp-hal-3rdparty platform layer; openvela only has nxsig_usleep.
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++#include <nuttx/signal.h>
++#include <sys/types.h>
++#include <unistd.h>
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++int nxsched_usleep(useconds_t usec)
++{
++  return nxsig_usleep(usec);
++}
++
+diff --git a/nuttx/arch/risc-v/src/esp32p4/esp_chip_rev.c b/nuttx/arch/risc-v/src/esp32p4/esp_chip_rev.c
+new file mode 100644
+--- /dev/null
++++ b/nuttx/arch/risc-v/src/esp32p4/esp_chip_rev.c
++/****************************************************************************
++ * arch/risc-v/src/esp32p4/esp_chip_rev.c
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.  The
++ * ASF licenses this file to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance with the
++ * License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++ * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++ * License for the specific language governing permissions and limitations
++ * under the License.
++ *
++ ****************************************************************************/
++
++/****************************************************************************
++ * Included Files
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++#include "rom/ets_sys.h"
++
++#include "hal/efuse_hal.h"
++
++/****************************************************************************
++ * Pre-processor Definitions
++ ****************************************************************************/
++
++#define ESP32P4_MIN_FULLY_SUPPORTED_VERSION 300
++
++/****************************************************************************
++ * Public Functions
++ ****************************************************************************/
++
++/****************************************************************************
++ * ROM Function Prototypes
++ ****************************************************************************/
++
++extern int ets_printf(const char *fmt, ...) printf_like(1, 2);
++
++/****************************************************************************
++ * Name: esp_chip_revision_check
++ *
++ * Description:
++ *   Checks if the current  chip revision is greater than the minimum
++ *   revision supported by NuttX. If the chip revision is not supported, an
++ *   error or warning message is printed, and the system may halt unless
++ *   the configuration allows ignoring the chip revision check.
++ *
++ * Input Parameters:
++ *   None
++ *
++ * Returned Value:
++ *   None
++ *
++ ****************************************************************************/
++
++void esp_chip_revision_check(void)
++{
++  uint32_t chip_rev = efuse_hal_chip_revision();
++
++  if (chip_rev < ESP32P4_MIN_FULLY_SUPPORTED_VERSION)
++    {
++#if !defined(CONFIG_ESP32P4_SELECTS_REV_LESS_V3)
++      ets_printf("ERROR: NuttX supports ESP32-P4 chip revision > v%d.%01d"
++                 " (chip revision is v%" PRIu32 ".%" PRIu32 ")\n",
++                 ESP32P4_MIN_FULLY_SUPPORTED_VERSION / 100,
++                 ESP32P4_MIN_FULLY_SUPPORTED_VERSION % 100,
++                 chip_rev / 100, chip_rev % 100);
++      PANIC();
++#else
++      ets_printf("WARNING: NuttX supports ESP32-P4 chip revision > v%d.%01d"
++                 " (chip revision is v%" PRIu32 ".%" PRIu32 ").\n"
++                 "Ignoring this error and continuing because "
++                 "`CONFIG_ESP32P4_SELECTS_REV_LESS_V3` is set...\n"
++                 "THIS MAY NOT WORK! DON'T USE THIS CHIP IN PRODUCTION!\n",
++                 ESP32P4_MIN_FULLY_SUPPORTED_VERSION / 100,
++                 ESP32P4_MIN_FULLY_SUPPORTED_VERSION % 100,
++                 chip_rev / 100, chip_rev % 100);
++#endif
++    }
++}
++
+diff --git a/nuttx/arch/risc-v/src/esp32p4/hal_esp32p4.cmake b/nuttx/arch/risc-v/src/esp32p4/hal_esp32p4.cmake
+new file mode 100644
+--- /dev/null
++++ b/nuttx/arch/risc-v/src/esp32p4/hal_esp32p4.cmake
++# ##############################################################################
++# arch/risc-v/src/esp32p4/hal_esp32p4.cmake
++#
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed to the Apache Software Foundation (ASF) under one or more contributor
++# license agreements.  See the NOTICE file distributed with this work for
++# additional information regarding copyright ownership.  The ASF licenses this
++# file to you under the Apache License, Version 2.0 (the "License"); you may not
++# use this file except in compliance with the License.  You may obtain a copy of
++# the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++# License for the specific language governing permissions and limitations under
++# the License.
++#
++# ##############################################################################
++
++# ##############################################################################
++# Include Paths (from hal_esp32p4.mk)
++# ##############################################################################
++
++if(NOT EXISTS ${ESP_HAL_3RDPARTY_REPO})
++  message(
++    FATAL_ERROR
++      "ESP_HAL_3RDPARTY_REPO does not exist: ${ESP_HAL_3RDPARTY_REPO}. Please ensure the HAL 3rd party repository is cloned correctly."
++  )
++endif()
++
++set(ESP32P4_INCLUDES
++    ${ESP_HAL_3RDPARTY_REPO}/nuttx/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/nuttx/include
++    ${ESP_HAL_3RDPARTY_REPO}/nuttx/include/mbedtls
++    ${ESP_HAL_3RDPARTY_REPO}/nuttx/src/components/esp_libc/platform_include
++    ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/bootloader_flash/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/private_include
++    ${ESP_HAL_3RDPARTY_REPO}/components/efuse/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/efuse/private_include
++    ${ESP_HAL_3RDPARTY_REPO}/components/efuse/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/efuse/${CHIP_SERIES}/private_include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_adc/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_adc/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_adc/interface
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_app_format/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_blockdev/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_common/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_event/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_touch_sens
++    ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_touch_sens/common
++    ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_touch_sens/hw_ver3
++    ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_touch_sens/hw_ver3/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_touch_sens/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_ana_cmpr/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_ana_cmpr/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_ana_conv/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_ana_conv/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_cam/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_cam/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_clock/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_clock/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_dma/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_dma/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_emac/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_emac/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_gpio/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_gpio/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_gpspi/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_gpspi/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_i2c/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_i2c/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_i2s/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_i2s/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_lcd/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_lcd/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_ledc/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_ledc/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_mcpwm/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_mcpwm/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_mspi/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_mspi/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_parlio/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_parlio/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_pcnt/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_pcnt/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_pmu/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_pmu/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_rmt/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_rmt/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_rtc_timer/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_rtc_timer/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_security/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_security/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_timg/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_timg/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_touch_sens/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_touch_sens/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_twai/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_twai/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_uart/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_uart/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_usb/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_usb/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_wdt/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_wdt/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/dma/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/etm/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/include/esp_private
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/include/soc
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/include/soc/${CHIP_SERIES}
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/ldo/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/mspi/mspi_intr/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/mspi/mspi_timing_tuning/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/mspi/mspi_timing_tuning/port/${CHIP_SERIES}
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/mspi/mspi_timing_tuning/tuning_scheme_impl/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/port/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/port/${CHIP_SERIES}/private_include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/port/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/power_supply/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_libc/priv_include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_mm/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_pm
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_pm/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_psram/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_psram/device/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_psram/xip_impl/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_rom/${CHIP_SERIES}
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_rom/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_rom/${CHIP_SERIES}/include/${CHIP_SERIES}
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_rom/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_security/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_system/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_system/ld
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_system/port/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_system/port/include/private
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_system/port/public_compat
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_timer/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_timer/private_include
++    ${ESP_HAL_3RDPARTY_REPO}/components/hal/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/hal/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/hal/platform_port/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/heap/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/log
++    ${ESP_HAL_3RDPARTY_REPO}/components/log/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/log/src/log_level/tag_log_level
++    ${ESP_HAL_3RDPARTY_REPO}/components/mbedtls/mbedtls/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/mbedtls/mbedtls/tf-psa-crypto/core
++    ${ESP_HAL_3RDPARTY_REPO}/components/mbedtls/mbedtls/tf-psa-crypto/drivers/builtin/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/mbedtls/mbedtls/tf-psa-crypto/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/mbedtls/port/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/mbedtls/port/include/aes
++    ${ESP_HAL_3RDPARTY_REPO}/components/mbedtls/port/psa_driver/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/riscv/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/soc/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/soc/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/spi_flash/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/spi_flash/include/esp_flash_chips
++    ${ESP_HAL_3RDPARTY_REPO}/components/ulp
++    ${ESP_HAL_3RDPARTY_REPO}/components/ulp/lp_core
++    ${ESP_HAL_3RDPARTY_REPO}/components/ulp/lp_core/shared
++    ${ESP_HAL_3RDPARTY_REPO}/components/ulp/lp_core/shared/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/ulp/lp_core/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/ulp/ulp_common
++    ${ESP_HAL_3RDPARTY_REPO}/components/ulp/ulp_common/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_ana_cmpr/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_ana_cmpr/${CHIP_SERIES}/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_dma/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_dma/src
++    ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_gpio/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_rmt/include
++    ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_rmt/src
++    ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_uart/include)
++
++if(CONFIG_ESP32P4_SELECTS_REV_LESS_V3)
++  list(APPEND ESP32P4_INCLUDES
++       ${ESP_HAL_3RDPARTY_REPO}/components/soc/${CHIP_SERIES}/register/hw_ver1)
++else()
++  list(APPEND ESP32P4_INCLUDES
++       ${ESP_HAL_3RDPARTY_REPO}/components/soc/${CHIP_SERIES}/register/hw_ver3)
++endif()
++
++target_include_directories(arch PRIVATE ${ESP32P4_INCLUDES})
++
++# ##############################################################################
++# Linker Scripts (from hal_esp32p4.mk)
++# ##############################################################################
++
++set(ESP_ROM_LD_DIR
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_rom/${CHIP_SERIES}/ld)
++set(ESP_SOC_LD_DIR ${ESP_HAL_3RDPARTY_REPO}/components/soc/${CHIP_SERIES}/ld)
++set(ESP_RISCV_LD_DIR ${ESP_HAL_3RDPARTY_REPO}/components/riscv/ld)
++
++if(NOT "${CONFIG_ESP32P4_SELECTS_REV_LESS_V3}" STREQUAL "y")
++  set(_esp32p4_rom_ld_files
++      ${ESP_ROM_LD_DIR}/${CHIP_SERIES}.rom.eco5.ld
++      ${ESP_ROM_LD_DIR}/${CHIP_SERIES}.rom.eco5.libc.ld
++      ${ESP_ROM_LD_DIR}/${CHIP_SERIES}.rom.eco5.libgcc.ld)
++  if(NOT "${CONFIG_ESPRESSIF_DONT_USE_ROM_LIBC}" STREQUAL "y")
++    list(APPEND _esp32p4_rom_ld_files
++         ${ESP_ROM_LD_DIR}/${CHIP_SERIES}.rom.eco5.newlib.ld)
++  endif()
++else()
++  set(_esp32p4_rom_ld_files
++      ${ESP_ROM_LD_DIR}/${CHIP_SERIES}.rom.ld
++      ${ESP_ROM_LD_DIR}/${CHIP_SERIES}.rom.libc.ld
++      ${ESP_ROM_LD_DIR}/${CHIP_SERIES}.rom.libgcc.ld)
++  if(NOT "${CONFIG_ESPRESSIF_DONT_USE_ROM_LIBC}" STREQUAL "y")
++    list(APPEND _esp32p4_rom_ld_files
++         ${ESP_ROM_LD_DIR}/${CHIP_SERIES}.rom.newlib.ld)
++  endif()
++endif()
++
++list(
++  APPEND
++  _esp32p4_rom_ld_files
++  ${ESP_ROM_LD_DIR}/${CHIP_SERIES}.rom.api.ld
++  ${ESP_ROM_LD_DIR}/${CHIP_SERIES}.rom.version.ld
++  ${ESP_ROM_LD_DIR}/${CHIP_SERIES}.rom.libc-suboptimal_for_misaligned_mem.ld
++  ${ESP_ROM_LD_DIR}/${CHIP_SERIES}.rom.systimer.ld
++  ${ESP_SOC_LD_DIR}/${CHIP_SERIES}.peripherals.ld
++  ${ESP_RISCV_LD_DIR}/rom.api.ld)
++
++if(CONFIG_ESPRESSIF_USE_LP_CORE)
++  list(
++    APPEND
++    _esp32p4_rom_ld_files
++    ${NUTTX_DIR}/boards/${CONFIG_ARCH}/${CHIP_SERIES}/common/scripts/ulp_aliases.ld
++  )
++endif()
++
++# Add these files to the GLOBAL PROPERTY LD_SCRIPT
++set_property(GLOBAL APPEND PROPERTY LD_SCRIPT ${_esp32p4_rom_ld_files})
++
++# ##############################################################################
++# HAL Source Files (from hal_esp32p4.mk CHIP_CSRCS)
++# ##############################################################################
++
++set(HAL_SRCS)
++
++list(
++  APPEND
++  HAL_SRCS
++  ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/src/bootloader_efuse.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/src/bootloader_init.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/src/esp_image_format.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/src/flash_encrypt.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/efuse/${CHIP_SERIES}/esp_efuse_fields.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/efuse/${CHIP_SERIES}/esp_efuse_rtc_calib.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/efuse/${CHIP_SERIES}/esp_efuse_table.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/efuse/${CHIP_SERIES}/esp_efuse_utility.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/efuse/src/efuse_controller/keys/with_key_purposes/esp_efuse_api_key.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/efuse/src/esp_efuse_api.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/efuse/src/esp_efuse_utility.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_adc/${CHIP_SERIES}/curve_fitting_coefficients.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_adc/adc_cali_curve_fitting.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_adc/adc_cali.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_ana_cmpr/${CHIP_SERIES}/ana_cmpr_periph.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_ana_conv/${CHIP_SERIES}/adc_periph.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_ana_conv/${CHIP_SERIES}/temperature_sensor_periph.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_ana_conv/adc_hal_common.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_ana_conv/adc_oneshot_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_touch_sens/common/touch_sens_common.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_touch_sens/hw_ver3/touch_version_specific.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_touch_sens/${CHIP_SERIES}/touch_sensor_periph.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_security/aes_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_clock/${CHIP_SERIES}/clk_tree_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_dma/${CHIP_SERIES}/gdma_periph.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_dma/gdma_hal_ahb_v2.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_dma/gdma_hal_axi.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_dma/gdma_hal_crc_gen.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_dma/gdma_hal_top.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_gpio/${CHIP_SERIES}/dedic_gpio_periph.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_gpio/${CHIP_SERIES}/sdm_periph.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_gpio/gpio_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_gpio/rtc_io_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_gpio/sdm_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_gpio/${CHIP_SERIES}/rtc_io_periph.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_gpspi/${CHIP_SERIES}/spi_periph.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_gpspi/spi_hal_iram.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_gpspi/spi_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_gpspi/spi_slave_hal_iram.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_gpspi/spi_slave_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_i2c/${CHIP_SERIES}/i2c_periph.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_i2c/i2c_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_i2s/${CHIP_SERIES}/i2s_periph.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_i2s/i2s_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_ledc/${CHIP_SERIES}/ledc_periph.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_ledc/ledc_hal_iram.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_ledc/ledc_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_mcpwm/${CHIP_SERIES}/mcpwm_periph.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_mcpwm/mcpwm_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_mspi/spi_flash_encrypt_hal_iram.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_mspi/spi_flash_hal_gpspi.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_mspi/spi_flash_hal_iram.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_mspi/spi_flash_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_pcnt/${CHIP_SERIES}/pcnt_periph.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_pcnt/pcnt_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_pmu/brownout_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_pmu/${CHIP_SERIES}/pau_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_pmu/${CHIP_SERIES}/pmu_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_rmt/${CHIP_SERIES}/rmt_periph.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_rmt/rmt_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_security/hmac_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_security/sha_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_timg/${CHIP_SERIES}/timer_periph.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_timg/timer_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_touch_sens/touch_sens_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_twai/${CHIP_SERIES}/twai_periph.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_twai/twai_hal_v1.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_uart/${CHIP_SERIES}/uart_periph.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_uart/uart_hal_iram.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_uart/uart_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_wdt/wdt_hal_iram.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/adc_share_hw_ctrl.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/clk_ctrl_os.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/clk_utils.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/cpu.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/esp_clk.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/esp_gpio_reserve.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/esp_memory_utils.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/hw_random.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/intr_alloc.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/mac_addr.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/mspi/mspi_timing_tuning/mspi_timing_tuning.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/periph_ctrl.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/ldo/esp_ldo_regulator.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/lowpower/port/${CHIP_SERIES}/sleep_cpu_asm.S
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/lowpower/port/${CHIP_SERIES}/sleep_cpu.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/lowpower/port/${CHIP_SERIES}/sleep_cpu_static.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/lowpower/port/${CHIP_SERIES}/sleep_clock.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/port/${CHIP_SERIES}/cpu_region_protect.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/port/${CHIP_SERIES}/esp_clk_tree.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/port/${CHIP_SERIES}/esp_cpu_intr.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/port/${CHIP_SERIES}/io_mux.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/port/${CHIP_SERIES}/peripheral_domain_pd.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/port/${CHIP_SERIES}/pmu_init.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/port/${CHIP_SERIES}/pmu_param.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/port/${CHIP_SERIES}/pmu_pvt.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/port/${CHIP_SERIES}/pmu_sleep.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/port/${CHIP_SERIES}/rtc_clk_init.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/port/${CHIP_SERIES}/rtc_clk.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/port/${CHIP_SERIES}/rtc_time.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/port/${CHIP_SERIES}/sar_periph_ctrl.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/port/${CHIP_SERIES}/systimer.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/port/esp_clk_tree_common.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/port/pau_regdma.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/port/regdma_link.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/power_supply/brownout.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/power_supply/vbat.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/regi2c_ctrl.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/rtc_module.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/sleep_console.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/sleep_event.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/sleep_gpio.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/sleep_modem.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/sleep_modes.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/sleep_mspi.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/sleep_retention.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/sleep_system_peripheral.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/sleep_uart.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/sleep_usb.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_mm/esp_cache_msync.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_mm/esp_cache_utils.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_mm/esp_mmu_map.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_mm/port/${CHIP_SERIES}/ext_mem_layout.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_pm/pm_impl.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_pm/pm_locks.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_rom/patches/esp_rom_clic.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_rom/patches/esp_rom_crc.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_rom/patches/esp_rom_efuse.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_rom/patches/esp_rom_gpio.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_rom/patches/esp_rom_print.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_rom/patches/esp_rom_regi2c_${CHIP_SERIES}.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_rom/patches/esp_rom_serial_output.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_rom/patches/esp_rom_spiflash.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_rom/patches/esp_rom_sys.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_rom/patches/esp_rom_systimer.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_security/src/esp_crypto_lock.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_security/src/esp_crypto_periph_clk.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_security/src/esp_hmac.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_system/esp_err.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_system/esp_system.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_system/port/soc/${CHIP_SERIES}/clk.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_system/port/soc/${CHIP_SERIES}/reset_reason.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_system/port/soc/${CHIP_SERIES}/system_internal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_system/startup_funcs.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_system/startup.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_system/system_time.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_timer/src/esp_timer.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_timer/src/esp_timer_init.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_timer/src/esp_timer_impl_systimer.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_timer/src/system_time.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/esp_timer/src/esp_timer_impl_common.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/hal/${CHIP_SERIES}/efuse_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/hal/cache_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/hal/efuse_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/hal/hal_utils.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/hal/mmu_hal.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/log/src/log_level/log_level.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/log/src/log_level/tag_log_level/linked_list/log_linked_list.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/log/src/log_level/tag_log_level/tag_log_level.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/log/src/log.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/log/src/noos/log_lock.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/log/src/noos/log_timestamp.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/log/src/os/log_write.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/log/src/os/util.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/riscv/instruction_decode.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/riscv/interrupt_clic.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/riscv/interrupt.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/riscv/rv_utils.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/soc/${CHIP_SERIES}/gpio_periph.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/soc/${CHIP_SERIES}/interrupts.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/soc/${CHIP_SERIES}/power_supply_periph.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/soc/lldesc.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/spi_flash/cache_utils.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/spi_flash/esp_flash_api.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/spi_flash/esp_flash_spi_init.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/spi_flash/flash_brownout_hook.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/spi_flash/flash_mmap.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/spi_flash/flash_ops.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/spi_flash/memspi_host_driver.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/spi_flash/spi_flash_chip_drivers.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/spi_flash/spi_flash_chip_gd.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/spi_flash/spi_flash_chip_generic.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/spi_flash/spi_flash_chip_winbond.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/spi_flash/spi_flash_hpm_enable.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/spi_flash/spi_flash_os_func_app.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/spi_flash/spi_flash_os_func_noos.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/ulp/lp_core/lp_core_i2c.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/ulp/lp_core/lp_core_spi.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/ulp/lp_core/lp_core.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/ulp/lp_core/lp_core_mailbox.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/ulp/lp_core/lp_core_mailbox_impl_hw.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/ulp/lp_core/shared/ulp_lp_core_memory_shared.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/ulp/lp_core/shared/ulp_lp_core_lp_timer_shared.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_ana_cmpr/ana_cmpr.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_dma/src/esp_dma_utils.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_dma/src/gdma_link.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_dma/src/gdma.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_gpio/src/gpio.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_gpio/src/rtc_io.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_rmt/src/rmt_common.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_rmt/src/rmt_encoder_bytes.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_rmt/src/rmt_encoder_copy.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_rmt/src/rmt_encoder_simple.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_rmt/src/rmt_encoder.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_rmt/src/rmt_rx.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_rmt/src/rmt_tx.c
++  ${ESP_HAL_3RDPARTY_REPO}/components/upper_hal_uart/src/uart_wakeup.c
++  ${ESP_HAL_3RDPARTY_REPO}/nuttx/src/components/newlib/newlib/libc/misc/init.c
++  ${ESP_HAL_3RDPARTY_REPO}/nuttx/src/heap_caps.c
++  ${ESP_HAL_3RDPARTY_REPO}/nuttx/src/platform/os.c)
++
++if(CONFIG_ESPRESSIF_WIFI OR CONFIG_ESPRESSIF_EMAC)
++  list(APPEND HAL_SRCS ${ESP_HAL_3RDPARTY_REPO}/nuttx/src/esp_event.c)
++endif()
++
++if(CONFIG_ESPRESSIF_EMAC)
++  list(
++    APPEND
++    HAL_SRCS
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_emac/emac_hal.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_emac/${CHIP_SERIES}/emac_periph.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_eth/src/esp_eth.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_eth/src/mac/esp_eth_mac_esp.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_eth/src/mac/esp_eth_mac_esp_dma.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_eth/src/mac/esp_eth_mac_esp_gpio.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_eth/src/phy/esp_eth_phy_802_3.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_eth/src/phy/esp_eth_phy_generic.c
++    # log_buffers.c provides ESP_LOG_BUFFER_HEXDUMP used by esp_eth_mac_esp.c
++    # for its dump_hal_registers diagnostic helper; util.c supplies the hex
++    # conversion helper consumed by log_buffers.c.
++    ${ESP_HAL_3RDPARTY_REPO}/components/log/src/util.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/log/src/buffer/log_buffers.c)
++  target_include_directories(
++    arch PRIVATE ${ESP_HAL_3RDPARTY_REPO}/components/esp_eth/include)
++endif()
++
++# Bootloader common
++list(
++  APPEND HAL_SRCS
++  ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/src/bootloader_mem.c)
++
++if(CONFIG_ESPRESSIF_SIMPLE_BOOT)
++  list(
++    APPEND
++    HAL_SRCS
++    ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/bootloader_flash/src/bootloader_flash_config_${CHIP_SERIES}.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/bootloader_flash/src/bootloader_flash.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/bootloader_flash/src/flash_qio_mode.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/src/${CHIP_SERIES}/bootloader_${CHIP_SERIES}.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/src/${CHIP_SERIES}/bootloader_soc.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/src/bootloader_clock_init.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/src/bootloader_clock_loader.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/src/bootloader_common_loader.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/src/bootloader_common.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/src/bootloader_console_loader.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/src/bootloader_console.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/src/bootloader_random_${CHIP_SERIES}.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/src/bootloader_random.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/src/bootloader_sha.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/efuse/src/esp_efuse_fields.c
++    ${ESP_HAL_3RDPARTY_REPO}/nuttx/src/bootloader_banner_wrap.c)
++  target_link_options(nuttx PRIVATE -Wl,--wrap=bootloader_print_banner)
++endif()
++
++if(CONFIG_ESPRESSIF_SPIRAM)
++  list(
++    APPEND
++    HAL_SRCS
++    ${ESP_HAL_3RDPARTY_REPO}/components/bootloader_support/bootloader_flash/src/bootloader_flash_config_${CHIP_SERIES}.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_mspi/${CHIP_SERIES}/mspi_periph.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/mspi/mspi_timing_tuning/port/${CHIP_SERIES}/mspi_timing_config.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/mspi/mspi_timing_tuning/tuning_scheme_impl/mspi_timing_by_dqs.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hw_support/mspi/mspi_timing_tuning/tuning_scheme_impl/mspi_timing_by_flash_delay.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_psram/system_layer/esp_psram_mspi.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_psram/system_layer/esp_psram.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_psram/device/esp_psram_impl_ap_hex.c
++  )
++
++  if(CONFIG_SPIRAM_FLASH_LOAD_TO_PSRAM)
++    list(
++      APPEND
++      HAL_SRCS
++      ${ESP_HAL_3RDPARTY_REPO}/components/esp_psram/xip_impl/mmu_psram_flash_v2.c
++    )
++  endif()
++endif()
++
++if(CONFIG_ESPRESSIF_MIPI_DSI)
++  list(
++    APPEND
++    HAL_SRCS
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_lcd/mipi_dsi_hal.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_lcd/${CHIP_SERIES}/mipi_dsi_periph.c
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_dma/dw_gdma_hal.c)
++endif()
++
++if(CONFIG_ESPRESSIF_MIPI_CSI)
++  list(
++    APPEND
++    HAL_SRCS
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_cam/${CHIP_SERIES}/mipi_csi_periph.c)
++endif()
++
++if(CONFIG_ESPRESSIF_MIPI_CSI)
++  list(
++    APPEND
++    HAL_SRCS
++    ${ESP_HAL_3RDPARTY_REPO}/components/esp_hal_cam/isp_hal.c)
++endif()
++
++if(CONFIG_ESPRESSIF_IDF_ENV_FPGA)
++  list(APPEND HAL_SRCS
++       ${ESP_HAL_3RDPARTY_REPO}/components/esp_system/fpga_overrides_clk.c
++       ${ESP_HAL_3RDPARTY_REPO}/components/esp_system/fpga_overrides_rng.c)
++  target_link_options(nuttx PRIVATE -u esp_common_include_fpga_overrides_clk -u
++                      esp_common_include_fpga_overrides_rng)
++endif()
++
++target_sources(arch PRIVATE ${HAL_SRCS})
++
++# ##############################################################################
++# This override is required to allow linker script to include "sdkconfig.h" and
++# "ld.common". Store path in a GLOBAL property (scope when hal runs); the
++# overridden function runs later from top-level and reads it.
++# ##############################################################################
++
++set_property(
++  GLOBAL PROPERTY LD_SCRIPT_ESPRESSIF_HAL_INCLUDE_DIR
++                  ${ESP_HAL_3RDPARTY_REPO}/nuttx/${CHIP_SERIES}/include)
++
++set_property(GLOBAL PROPERTY LD_SCRIPT_ESPRESSIF_ADDITIONAL_INCLUDE_DIR
++                             ${ESP_HAL_3RDPARTY_REPO}/components/esp_system/ld)
++
++function(nuttx_generate_preprocess_target)
++  nuttx_parse_function_args(
++    FUNC
++    nuttx_generate_preprocess_target
++    ONE_VALUE
++    SOURCE_FILE
++    TARGET_FILE
++    MULTI_VALUE
++    DEPENDS
++    REQUIRED
++    SOURCE_FILE
++    TARGET_FILE
++    ARGN
++    ${ARGN})
++
++  get_property(LD_SCRIPT_HAL_DIR GLOBAL
++               PROPERTY LD_SCRIPT_ESPRESSIF_HAL_INCLUDE_DIR)
++  get_property(LD_SCRIPT_ADDITIONAL_DIR GLOBAL
++               PROPERTY LD_SCRIPT_ESPRESSIF_ADDITIONAL_INCLUDE_DIR)
++  set(LD_SCRIPT_HAL_INCLUDE)
++  set(LD_SCRIPT_ADDITIONAL_INCLUDE)
++  if(LD_SCRIPT_HAL_DIR)
++    set(LD_SCRIPT_HAL_INCLUDE -I${LD_SCRIPT_HAL_DIR})
++  endif()
++  if(LD_SCRIPT_ADDITIONAL_DIR)
++    set(LD_SCRIPT_ADDITIONAL_INCLUDE -I${LD_SCRIPT_ADDITIONAL_DIR})
++  endif()
++
++  add_custom_command(
++    OUTPUT ${TARGET_FILE}
++    COMMAND
++      ${PREPROCESS} -I${NUTTX_BINARY_DIR}/include -I${NUTTX_DIR}/include
++      -I${NUTTX_CHIP_ABS_DIR} ${LD_SCRIPT_HAL_INCLUDE}
++      ${LD_SCRIPT_ADDITIONAL_INCLUDE} -D__NuttX__ ${SOURCE_FILE} >
++      ${TARGET_FILE}
++    DEPENDS ${SOURCE_FILE} ${DEPENDS})
++endfunction()
++
+diff --git a/nuttx/arch/risc-v/src/esp32p4/hal_esp32p4.mk b/nuttx/arch/risc-v/src/esp32p4/hal_esp32p4.mk
+new file mode 100644
+--- /dev/null
++++ b/nuttx/arch/risc-v/src/esp32p4/hal_esp32p4.mk
++############################################################################
++# arch/risc-v/src/esp32c6/esp32p4.mk
++#
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed to the Apache Software Foundation (ASF) under one or more
++# contributor license agreements.  See the NOTICE file distributed with
++# this work for additional information regarding copyright ownership.  The
++# ASF licenses this file to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance with the
++# License.  You may obtain a copy of the License at
++#
++#   http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++# License for the specific language governing permissions and limitations
++# under the License.
++#
++############################################################################
++
++# Include header paths
++
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)nuttx$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)nuttx$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)nuttx$(DELIM)include$(DELIM)mbedtls
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)nuttx$(DELIM)src$(DELIM)components$(DELIM)esp_libc$(DELIM)platform_include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)bootloader_support$(DELIM)bootloader_flash$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)bootloader_support$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)bootloader_support$(DELIM)private_include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)efuse$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)efuse$(DELIM)private_include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)efuse$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)efuse$(DELIM)$(CHIP_SERIES)$(DELIM)private_include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_adc$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_adc$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_adc$(DELIM)interface
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_app_format$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_blockdev$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_common$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_event$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_touch_sens
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_touch_sens$(DELIM)common
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_touch_sens$(DELIM)hw_ver3
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_touch_sens$(DELIM)hw_ver3$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_touch_sens$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_ana_cmpr$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_ana_cmpr$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_ana_conv$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_ana_conv$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_cam$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_cam$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_clock$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_clock$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_dma$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_dma$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_emac$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_emac$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_gpio$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_gpio$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_gpspi$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_gpspi$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_i2c$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_i2c$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_i2s$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_i2s$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_lcd$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_lcd$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_ledc$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_ledc$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_mcpwm$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_mcpwm$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_mspi$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_mspi$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_parlio$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_parlio$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_pcnt$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_pcnt$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_pmu$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_pmu$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_rmt$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_rmt$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_rtc_timer$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_rtc_timer$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_security$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_security$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_timg$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_timg$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_touch_sens$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_touch_sens$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_twai$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_twai$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_uart$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_uart$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_usb$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_usb$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_wdt$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_wdt$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)dma$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)etm$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)include$(DELIM)esp_private
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)include$(DELIM)soc
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)include$(DELIM)soc$(DELIM)$(CHIP_SERIES)
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)ldo$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)mspi$(DELIM)mspi_intr$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)mspi$(DELIM)mspi_timing_tuning$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)mspi$(DELIM)mspi_timing_tuning$(DELIM)port$(DELIM)$(CHIP_SERIES)
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)mspi$(DELIM)mspi_timing_tuning$(DELIM)tuning_scheme_impl$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)port$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)port$(DELIM)$(CHIP_SERIES)$(DELIM)private_include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)port$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)power_supply$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_libc$(DELIM)priv_include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_mm$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_pm
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_pm$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_psram$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_psram$(DELIM)device$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_psram$(DELIM)xip_impl$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)$(CHIP_SERIES)
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)$(CHIP_SERIES)$(DELIM)include$(DELIM)$(CHIP_SERIES)
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_security$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_system$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_system$(DELIM)ld
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_system$(DELIM)port$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_system$(DELIM)port$(DELIM)include$(DELIM)private
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_system$(DELIM)port$(DELIM)public_compat
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_timer$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_timer$(DELIM)private_include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)hal$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)hal$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)hal$(DELIM)platform_port$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)heap$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)log
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)log$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)log$(DELIM)src$(DELIM)log_level$(DELIM)tag_log_level
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)mbedtls$(DELIM)mbedtls$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)mbedtls$(DELIM)mbedtls$(DELIM)tf-psa-crypto$(DELIM)core
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)mbedtls$(DELIM)mbedtls$(DELIM)tf-psa-crypto$(DELIM)drivers$(DELIM)builtin$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)mbedtls$(DELIM)mbedtls$(DELIM)tf-psa-crypto$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)mbedtls$(DELIM)port$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)mbedtls$(DELIM)port$(DELIM)include$(DELIM)aes
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)mbedtls$(DELIM)port$(DELIM)psa_driver$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)riscv$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)soc$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)soc$(DELIM)include
++ifeq ($(CONFIG_ESP32P4_SELECTS_REV_LESS_V3),y)
++  INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)soc$(DELIM)$(CHIP_SERIES)$(DELIM)register$(DELIM)hw_ver1
++else
++  INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)soc$(DELIM)$(CHIP_SERIES)$(DELIM)register$(DELIM)hw_ver3
++endif
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)spi_flash$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)spi_flash$(DELIM)include$(DELIM)esp_flash_chips
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)ulp
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)ulp$(DELIM)lp_core
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)ulp$(DELIM)lp_core$(DELIM)shared
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)ulp$(DELIM)lp_core$(DELIM)shared$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)ulp$(DELIM)lp_core$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)ulp$(DELIM)ulp_common
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)ulp$(DELIM)ulp_common$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_ana_cmpr$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_ana_cmpr$(DELIM)$(CHIP_SERIES)$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_dma$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_dma$(DELIM)src
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_gpio$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_rmt$(DELIM)include
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_rmt$(DELIM)src
++INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_uart$(DELIM)include
++
++# Linker scripts
++
++ifneq ($(CONFIG_ESP32P4_SELECTS_REV_LESS_V3),y)
++ARCHSCRIPT += $(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)$(CHIP_SERIES)$(DELIM)ld$(DELIM)$(CHIP_SERIES).rom.eco5.ld
++ARCHSCRIPT += $(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)$(CHIP_SERIES)$(DELIM)ld$(DELIM)$(CHIP_SERIES).rom.eco5.libc.ld
++ARCHSCRIPT += $(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)$(CHIP_SERIES)$(DELIM)ld$(DELIM)$(CHIP_SERIES).rom.eco5.libgcc.ld
++ifeq ($(CONFIG_ESPRESSIF_DONT_USE_ROM_LIBC),y)
++ # Use NuttX libc instead of ROM newlib functions
++else
++ARCHSCRIPT += $(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)$(CHIP_SERIES)$(DELIM)ld$(DELIM)$(CHIP_SERIES).rom.eco5.newlib.ld
++endif
++else
++ARCHSCRIPT += $(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)$(CHIP_SERIES)$(DELIM)ld$(DELIM)$(CHIP_SERIES).rom.ld
++ARCHSCRIPT += $(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)$(CHIP_SERIES)$(DELIM)ld$(DELIM)$(CHIP_SERIES).rom.libc.ld
++ARCHSCRIPT += $(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)$(CHIP_SERIES)$(DELIM)ld$(DELIM)$(CHIP_SERIES).rom.libgcc.ld
++ifeq ($(CONFIG_ESPRESSIF_DONT_USE_ROM_LIBC),y)
++ # Use NuttX libc instead of ROM newlib functions
++else
++ARCHSCRIPT += $(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)$(CHIP_SERIES)$(DELIM)ld$(DELIM)$(CHIP_SERIES).rom.newlib.ld
++endif
++endif
++
++ARCHSCRIPT += $(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)$(CHIP_SERIES)$(DELIM)ld$(DELIM)$(CHIP_SERIES).rom.api.ld
++ARCHSCRIPT += $(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)$(CHIP_SERIES)$(DELIM)ld$(DELIM)$(CHIP_SERIES).rom.version.ld
++ARCHSCRIPT += $(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)$(CHIP_SERIES)$(DELIM)ld$(DELIM)$(CHIP_SERIES).rom.libc-suboptimal_for_misaligned_mem.ld
++ARCHSCRIPT += $(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)$(CHIP_SERIES)$(DELIM)ld$(DELIM)$(CHIP_SERIES).rom.systimer.ld
++ARCHSCRIPT += $(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)soc$(DELIM)$(CHIP_SERIES)$(DELIM)ld$(DELIM)$(CHIP_SERIES).peripherals.ld
++ARCHSCRIPT += $(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)riscv$(DELIM)ld$(DELIM)rom.api.ld
++ifeq ($(CONFIG_ESPRESSIF_USE_LP_CORE),y)
++  ARCHSCRIPT += $(TOPDIR)$(DELIM)arch$(DELIM)$(CONFIG_ARCH)$(DELIM)src$(DELIM)board$(DELIM)scripts$(DELIM)ulp_aliases.ld
++endif
++
++# Source files
++
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)bootloader_support$(DELIM)src$(DELIM)bootloader_efuse.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)bootloader_support$(DELIM)src$(DELIM)bootloader_init.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)bootloader_support$(DELIM)src$(DELIM)esp_image_format.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)bootloader_support$(DELIM)src$(DELIM)flash_encrypt.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)efuse$(DELIM)$(CHIP_SERIES)$(DELIM)esp_efuse_fields.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)efuse$(DELIM)$(CHIP_SERIES)$(DELIM)esp_efuse_rtc_calib.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)efuse$(DELIM)$(CHIP_SERIES)$(DELIM)esp_efuse_table.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)efuse$(DELIM)$(CHIP_SERIES)$(DELIM)esp_efuse_utility.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)efuse$(DELIM)src$(DELIM)efuse_controller$(DELIM)keys$(DELIM)with_key_purposes$(DELIM)esp_efuse_api_key.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)efuse$(DELIM)src$(DELIM)esp_efuse_api.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)efuse$(DELIM)src$(DELIM)esp_efuse_utility.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_adc$(DELIM)$(CHIP_SERIES)$(DELIM)curve_fitting_coefficients.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_adc$(DELIM)adc_cali_curve_fitting.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_adc$(DELIM)adc_cali.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_touch_sens$(DELIM)common$(DELIM)touch_sens_common.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_touch_sens$(DELIM)hw_ver3$(DELIM)touch_version_specific.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_touch_sens$(DELIM)$(CHIP_SERIES)$(DELIM)touch_sensor_periph.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_ana_cmpr$(DELIM)$(CHIP_SERIES)$(DELIM)ana_cmpr_periph.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_ana_conv$(DELIM)$(CHIP_SERIES)$(DELIM)adc_periph.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_ana_conv$(DELIM)$(CHIP_SERIES)$(DELIM)temperature_sensor_periph.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_ana_conv$(DELIM)adc_hal_common.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_ana_conv$(DELIM)adc_oneshot_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_security$(DELIM)aes_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_clock$(DELIM)$(CHIP_SERIES)$(DELIM)clk_tree_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_dma$(DELIM)$(CHIP_SERIES)$(DELIM)gdma_periph.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_dma$(DELIM)gdma_hal_ahb_v2.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_dma$(DELIM)gdma_hal_axi.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_dma$(DELIM)gdma_hal_crc_gen.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_dma$(DELIM)gdma_hal_top.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_gpio$(DELIM)$(CHIP_SERIES)$(DELIM)dedic_gpio_periph.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_gpio$(DELIM)$(CHIP_SERIES)$(DELIM)sdm_periph.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_gpio$(DELIM)gpio_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_gpio$(DELIM)rtc_io_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_gpio$(DELIM)sdm_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_gpio$(DELIM)$(CHIP_SERIES)$(DELIM)rtc_io_periph.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_gpspi$(DELIM)$(CHIP_SERIES)$(DELIM)spi_periph.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_gpspi$(DELIM)spi_hal_iram.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_gpspi$(DELIM)spi_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_gpspi$(DELIM)spi_slave_hal_iram.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_gpspi$(DELIM)spi_slave_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_i2c$(DELIM)$(CHIP_SERIES)$(DELIM)i2c_periph.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_i2c$(DELIM)i2c_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_i2s$(DELIM)$(CHIP_SERIES)$(DELIM)i2s_periph.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_i2s$(DELIM)i2s_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_ledc$(DELIM)$(CHIP_SERIES)$(DELIM)ledc_periph.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_ledc$(DELIM)ledc_hal_iram.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_ledc$(DELIM)ledc_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_mcpwm$(DELIM)$(CHIP_SERIES)$(DELIM)mcpwm_periph.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_mcpwm$(DELIM)mcpwm_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_mspi$(DELIM)spi_flash_encrypt_hal_iram.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_mspi$(DELIM)spi_flash_hal_gpspi.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_mspi$(DELIM)spi_flash_hal_iram.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_mspi$(DELIM)spi_flash_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_pcnt$(DELIM)$(CHIP_SERIES)$(DELIM)pcnt_periph.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_pcnt$(DELIM)pcnt_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_pmu$(DELIM)brownout_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_pmu$(DELIM)$(CHIP_SERIES)$(DELIM)pau_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_pmu$(DELIM)$(CHIP_SERIES)$(DELIM)pmu_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_rmt$(DELIM)$(CHIP_SERIES)$(DELIM)rmt_periph.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_rmt$(DELIM)rmt_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_security$(DELIM)hmac_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_security$(DELIM)sha_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_timg$(DELIM)$(CHIP_SERIES)$(DELIM)timer_periph.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_timg$(DELIM)timer_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_touch_sens$(DELIM)touch_sens_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_twai$(DELIM)$(CHIP_SERIES)$(DELIM)twai_periph.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_twai$(DELIM)twai_hal_v1.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_uart$(DELIM)$(CHIP_SERIES)$(DELIM)uart_periph.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_uart$(DELIM)uart_hal_iram.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_uart$(DELIM)uart_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_wdt$(DELIM)wdt_hal_iram.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)adc_share_hw_ctrl.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)clk_ctrl_os.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)clk_utils.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)cpu.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)esp_clk.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)esp_gpio_reserve.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)esp_memory_utils.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)hw_random.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)intr_alloc.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)mac_addr.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)mspi$(DELIM)mspi_timing_tuning$(DELIM)mspi_timing_tuning.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)periph_ctrl.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)ldo$(DELIM)esp_ldo_regulator.c
++CHIP_ASRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)lowpower$(DELIM)port$(DELIM)$(CHIP_SERIES)$(DELIM)sleep_cpu_asm.S
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)lowpower$(DELIM)port$(DELIM)$(CHIP_SERIES)$(DELIM)sleep_cpu.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)lowpower$(DELIM)port$(DELIM)$(CHIP_SERIES)$(DELIM)sleep_cpu_static.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)lowpower$(DELIM)port$(DELIM)$(CHIP_SERIES)$(DELIM)sleep_clock.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)port$(DELIM)regdma_link.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)port$(DELIM)$(CHIP_SERIES)$(DELIM)cpu_region_protect.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)port$(DELIM)$(CHIP_SERIES)$(DELIM)esp_clk_tree.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)port$(DELIM)$(CHIP_SERIES)$(DELIM)esp_cpu_intr.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)port$(DELIM)$(CHIP_SERIES)$(DELIM)io_mux.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)port$(DELIM)$(CHIP_SERIES)$(DELIM)peripheral_domain_pd.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)port$(DELIM)$(CHIP_SERIES)$(DELIM)pmu_init.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)port$(DELIM)$(CHIP_SERIES)$(DELIM)pmu_param.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)port$(DELIM)$(CHIP_SERIES)$(DELIM)pmu_pvt.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)port$(DELIM)$(CHIP_SERIES)$(DELIM)pmu_sleep.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)port$(DELIM)$(CHIP_SERIES)$(DELIM)rtc_clk_init.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)port$(DELIM)$(CHIP_SERIES)$(DELIM)rtc_clk.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)port$(DELIM)$(CHIP_SERIES)$(DELIM)rtc_time.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)port$(DELIM)$(CHIP_SERIES)$(DELIM)sar_periph_ctrl.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)port$(DELIM)$(CHIP_SERIES)$(DELIM)systimer.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)port$(DELIM)esp_clk_tree_common.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)port$(DELIM)pau_regdma.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)power_supply$(DELIM)brownout.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)power_supply$(DELIM)vbat.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)regi2c_ctrl.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)rtc_module.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)sleep_console.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)sleep_event.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)sleep_gpio.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)sleep_modes.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)sleep_mspi.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)sleep_modem.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)sleep_uart.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)sleep_retention.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)sleep_system_peripheral.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)sleep_usb.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_mm$(DELIM)esp_cache_msync.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_mm$(DELIM)esp_cache_utils.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_mm$(DELIM)esp_mmu_map.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_mm$(DELIM)port$(DELIM)$(CHIP_SERIES)$(DELIM)ext_mem_layout.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_pm$(DELIM)pm_impl.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_pm$(DELIM)pm_locks.c
++ifeq ($(CONFIG_ESPRESSIF_SPIRAM),y)
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_mspi$(DELIM)$(CHIP_SERIES)$(DELIM)mspi_periph.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)mspi$(DELIM)mspi_timing_tuning$(DELIM)port$(DELIM)$(CHIP_SERIES)$(DELIM)mspi_timing_config.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)mspi$(DELIM)mspi_timing_tuning$(DELIM)tuning_scheme_impl$(DELIM)mspi_timing_by_dqs.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hw_support$(DELIM)mspi$(DELIM)mspi_timing_tuning$(DELIM)tuning_scheme_impl$(DELIM)mspi_timing_by_flash_delay.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_psram$(DELIM)system_layer$(DELIM)esp_psram_mspi.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_psram$(DELIM)system_layer$(DELIM)esp_psram.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_psram$(DELIM)device$(DELIM)esp_psram_impl_ap_hex.c
++ifeq ($(CONFIG_SPIRAM_FLASH_LOAD_TO_PSRAM),y)
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_psram$(DELIM)xip_impl$(DELIM)mmu_psram_flash_v2.c
++endif
++endif
++
++ifeq ($(CONFIG_ESPRESSIF_MIPI_DSI),y)
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_lcd$(DELIM)mipi_dsi_hal.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_lcd$(DELIM)$(CHIP_SERIES)$(DELIM)mipi_dsi_periph.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_dma$(DELIM)dw_gdma_hal.c
++endif
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)patches$(DELIM)esp_rom_clic.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)patches$(DELIM)esp_rom_crc.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)patches$(DELIM)esp_rom_efuse.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)patches$(DELIM)esp_rom_gpio.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)patches$(DELIM)esp_rom_print.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)patches$(DELIM)esp_rom_regi2c_$(CHIP_SERIES).c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)patches$(DELIM)esp_rom_serial_output.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)patches$(DELIM)esp_rom_spiflash.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)patches$(DELIM)esp_rom_sys.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_rom$(DELIM)patches$(DELIM)esp_rom_systimer.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_security$(DELIM)src$(DELIM)esp_crypto_lock.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_security$(DELIM)src$(DELIM)esp_crypto_periph_clk.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_security$(DELIM)src$(DELIM)esp_hmac.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_system$(DELIM)esp_err.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_system$(DELIM)esp_system.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_system$(DELIM)port$(DELIM)soc$(DELIM)$(CHIP_SERIES)$(DELIM)clk.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_system$(DELIM)port$(DELIM)soc$(DELIM)$(CHIP_SERIES)$(DELIM)reset_reason.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_system$(DELIM)port$(DELIM)soc$(DELIM)$(CHIP_SERIES)$(DELIM)system_internal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_system$(DELIM)startup_funcs.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_system$(DELIM)startup.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_system$(DELIM)system_time.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_timer$(DELIM)src$(DELIM)esp_timer.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_timer$(DELIM)src$(DELIM)esp_timer_init.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_timer$(DELIM)src$(DELIM)esp_timer_impl_systimer.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_timer$(DELIM)src$(DELIM)system_time.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_timer$(DELIM)src$(DELIM)esp_timer_impl_common.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)hal$(DELIM)$(CHIP_SERIES)$(DELIM)efuse_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)hal$(DELIM)cache_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)hal$(DELIM)efuse_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)hal$(DELIM)hal_utils.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)hal$(DELIM)mmu_hal.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)log$(DELIM)src$(DELIM)util.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)log$(DELIM)src$(DELIM)buffer$(DELIM)log_buffers.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)log$(DELIM)src$(DELIM)log_level$(DELIM)log_level.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)log$(DELIM)src$(DELIM)log_level$(DELIM)tag_log_level$(DELIM)linked_list$(DELIM)log_linked_list.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)log$(DELIM)src$(DELIM)log_level$(DELIM)tag_log_level$(DELIM)tag_log_level.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)log$(DELIM)src$(DELIM)log.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)log$(DELIM)src$(DELIM)noos$(DELIM)log_lock.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)log$(DELIM)src$(DELIM)noos$(DELIM)log_timestamp.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)log$(DELIM)src$(DELIM)os$(DELIM)log_write.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)log$(DELIM)src$(DELIM)os$(DELIM)util.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)riscv$(DELIM)instruction_decode.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)riscv$(DELIM)interrupt_clic.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)riscv$(DELIM)interrupt.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)riscv$(DELIM)rv_utils.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)soc$(DELIM)$(CHIP_SERIES)$(DELIM)gpio_periph.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)soc$(DELIM)$(CHIP_SERIES)$(DELIM)interrupts.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)soc$(DELIM)$(CHIP_SERIES)$(DELIM)power_supply_periph.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)soc$(DELIM)lldesc.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)spi_flash$(DELIM)cache_utils.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)spi_flash$(DELIM)esp_flash_api.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)spi_flash$(DELIM)esp_flash_spi_init.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)spi_flash$(DELIM)flash_brownout_hook.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)spi_flash$(DELIM)flash_mmap.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)spi_flash$(DELIM)flash_ops.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)spi_flash$(DELIM)memspi_host_driver.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)spi_flash$(DELIM)spi_flash_chip_drivers.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)spi_flash$(DELIM)spi_flash_chip_gd.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)spi_flash$(DELIM)spi_flash_chip_generic.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)spi_flash$(DELIM)spi_flash_chip_winbond.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)spi_flash$(DELIM)spi_flash_hpm_enable.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)spi_flash$(DELIM)spi_flash_os_func_app.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)spi_flash$(DELIM)spi_flash_os_func_noos.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)ulp$(DELIM)lp_core$(DELIM)lp_core_i2c.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)ulp$(DELIM)lp_core$(DELIM)lp_core_spi.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)ulp$(DELIM)lp_core$(DELIM)lp_core.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)ulp$(DELIM)lp_core$(DELIM)lp_core_mailbox.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)ulp$(DELIM)lp_core$(DELIM)lp_core_mailbox_impl_hw.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)ulp$(DELIM)lp_core$(DELIM)shared$(DELIM)ulp_lp_core_memory_shared.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)ulp$(DELIM)lp_core$(DELIM)shared$(DELIM)ulp_lp_core_lp_timer_shared.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_ana_cmpr$(DELIM)ana_cmpr.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_dma$(DELIM)src$(DELIM)esp_dma_utils.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_dma$(DELIM)src$(DELIM)gdma_link.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_dma$(DELIM)src$(DELIM)gdma.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_gpio$(DELIM)src$(DELIM)gpio.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_gpio$(DELIM)src$(DELIM)rtc_io.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_rmt$(DELIM)src$(DELIM)rmt_common.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_rmt$(DELIM)src$(DELIM)rmt_encoder_bytes.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_rmt$(DELIM)src$(DELIM)rmt_encoder_copy.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_rmt$(DELIM)src$(DELIM)rmt_encoder_simple.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_rmt$(DELIM)src$(DELIM)rmt_encoder.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_rmt$(DELIM)src$(DELIM)rmt_rx.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_rmt$(DELIM)src$(DELIM)rmt_tx.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)upper_hal_uart$(DELIM)src$(DELIM)uart_wakeup.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)nuttx$(DELIM)src$(DELIM)components$(DELIM)newlib$(DELIM)newlib$(DELIM)libc$(DELIM)misc$(DELIM)init.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)nuttx$(DELIM)src$(DELIM)heap_caps.c
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)nuttx$(DELIM)src$(DELIM)platform$(DELIM)os.c
++
++ifneq ($(CONFIG_ESPRESSIF_WIFI)$(CONFIG_ESPRESSIF_EMAC),)
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)nuttx$(DELIM)src$(DELIM)esp_event.c
++endif
++
++ifeq ($(CONFIG_ESPRESSIF_EMAC),y)
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_emac$(DELIM)emac_hal.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_hal_emac$(DELIM)$(CHIP_SERIES)$(DELIM)emac_periph.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_eth$(DELIM)src$(DELIM)esp_eth.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_eth$(DELIM)src$(DELIM)mac$(DELIM)esp_eth_mac_esp.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_eth$(DELIM)src$(DELIM)mac$(DELIM)esp_eth_mac_esp_dma.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_eth$(DELIM)src$(DELIM)mac$(DELIM)esp_eth_mac_esp_gpio.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_eth$(DELIM)src$(DELIM)phy$(DELIM)esp_eth_phy_802_3.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_eth$(DELIM)src$(DELIM)phy$(DELIM)esp_eth_phy_generic.c
++
++  INCLUDES += $(INCDIR_PREFIX)$(ARCH_SRCDIR)$(DELIM)chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_eth$(DELIM)include
++endif
++
++# Bootloader files
++
++CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)bootloader_support$(DELIM)src$(DELIM)bootloader_mem.c
++
++ifeq ($(CONFIG_ESPRESSIF_SIMPLE_BOOT),y)
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)bootloader_support$(DELIM)bootloader_flash$(DELIM)src$(DELIM)bootloader_flash_config_${CHIP_SERIES}.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)bootloader_support$(DELIM)bootloader_flash$(DELIM)src$(DELIM)bootloader_flash.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)bootloader_support$(DELIM)bootloader_flash$(DELIM)src$(DELIM)flash_qio_mode.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)bootloader_support$(DELIM)src$(DELIM)${CHIP_SERIES}$(DELIM)bootloader_${CHIP_SERIES}.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)bootloader_support$(DELIM)src$(DELIM)${CHIP_SERIES}$(DELIM)bootloader_soc.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)bootloader_support$(DELIM)src$(DELIM)bootloader_clock_init.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)bootloader_support$(DELIM)src$(DELIM)bootloader_clock_loader.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)bootloader_support$(DELIM)src$(DELIM)bootloader_common_loader.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)bootloader_support$(DELIM)src$(DELIM)bootloader_common.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)bootloader_support$(DELIM)src$(DELIM)bootloader_console_loader.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)bootloader_support$(DELIM)src$(DELIM)bootloader_console.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)bootloader_support$(DELIM)src$(DELIM)bootloader_random_${CHIP_SERIES}.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)bootloader_support$(DELIM)src$(DELIM)bootloader_random.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)bootloader_support$(DELIM)src$(DELIM)bootloader_sha.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)efuse$(DELIM)src$(DELIM)esp_efuse_fields.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)nuttx$(DELIM)src$(DELIM)bootloader_banner_wrap.c
++
++  LDFLAGS += --wrap=bootloader_print_banner
++endif
++
++ifeq ($(CONFIG_ESPRESSIF_IDF_ENV_FPGA),y)
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_system$(DELIM)fpga_overrides_clk.c
++  CHIP_CSRCS += chip$(DELIM)$(ESP_HAL_3RDPARTY_REPO)$(DELIM)components$(DELIM)esp_system$(DELIM)fpga_overrides_rng.c
++
++  LDFLAGS += -u esp_common_include_fpga_overrides_clk
++  LDFLAGS += -u esp_common_include_fpga_overrides_rng
++endif
++
+diff --git a/nuttx/arch/risc-v/src/esp32p4/Kconfig b/nuttx/arch/risc-v/src/esp32p4/Kconfig
+new file mode 100644
+--- /dev/null
++++ b/nuttx/arch/risc-v/src/esp32p4/Kconfig
++#
++# For a description of the syntax of this configuration file,
++# see the file kconfig-language.txt in the NuttX tools repository.
++#
++
++if ARCH_CHIP_ESP32P4
++
++source "arch/risc-v/src/common/espressif/Kconfig"
++
++config ESP32P4_SELECTS_REV_LESS_V3
++	bool "Select ESP32-P4 revisions <3.0 (No >=3.x Support)"
++	default n
++	---help---
++		Select this option to support ESP32-P4 revisions 0.x and 1.x.
++		Revisions higher than 3.0 (included) and revisions less than 3.0
++		have huge hardware difference.
++		Revisions higher than 3.0 (included) is not compatible with 0.x and 1.x.
++
++choice ESP32P4_REV_MIN
++	prompt "Minimum Supported ESP32-P4 Revision"
++	default ESP32P4_REV_MIN_301
++	---help---
++		Required minimum chip revision. ESP-IDF will check for it and
++		reject to boot if the chip revision fails the check.
++		This ensures the chip used will have some modifications (features, or bugfixes).
++
++		The complied binary will only support chips above this revision,
++		this will also help to reduce binary size.
++
++config ESP32P4_REV_MIN_0
++	depends on ESP32P4_SELECTS_REV_LESS_V3
++	bool "Rev v0.0"
++
++config ESP32P4_REV_MIN_1
++	depends on ESP32P4_SELECTS_REV_LESS_V3
++	bool "Rev v0.1"
++
++config ESP32P4_REV_MIN_100
++	depends on ESP32P4_SELECTS_REV_LESS_V3
++	bool "Rev v1.0"
++
++config ESP32P4_REV_MIN_300
++	bool "Rev v3.0"
++	depends on !ESP32P4_SELECTS_REV_LESS_V3
++
++config ESP32P4_REV_MIN_301
++	bool "Rev v3.1"
++	depends on !ESP32P4_SELECTS_REV_LESS_V3
++
++endchoice # ESP32P4_REV_MIN
++
++config ESP32P4_REV_MIN_FULL
++	int
++	default 0 if ESP32P4_REV_MIN_0
++	default 1 if ESP32P4_REV_MIN_1
++	default 100 if ESP32P4_REV_MIN_100
++	default 300 if ESP32P4_REV_MIN_300
++	default 301 if ESP32P4_REV_MIN_301
++
++config ESP_REV_MIN_FULL
++	int
++	default ESP32P4_REV_MIN_FULL
++
++config ESP32P4_REV_MAX_FULL
++	int
++	default 399 if !ESP32P4_SELECTS_REV_LESS_V3
++	default 199 if ESP32P4_SELECTS_REV_LESS_V3
++
++# keep in sync the "Maximum Supported Revision" description with this value
++
++config ESP_REV_MAX_FULL
++	int
++	default ESP32P4_REV_MAX_FULL
++
++config ESP_EFUSE_BLOCK_REV_MIN_FULL
++	int "Minimum Supported ESP32-P4 eFuse Block Revision"
++	default 0
++	---help---
++		Required minimum eFuse Block revision. ESP-IDF will check it at the 2nd bootloader stage
++		whether the current image can work correctly for this eFuse Block revision.
++		So that to avoid running an incompatible image on a SoC that contains breaking change in the eFuse Block.
++		If you want to update this value to run the image that not compatible with the current eFuse Block revision,
++		please contact to Espressif's business team for details:
++		https://www.espressif.com.cn/en/contact-us/sales-questions
++
++config ESP_EFUSE_BLOCK_REV_MAX_FULL
++	int
++	default 199
++	comment "Maximum Supported ESP32-P4 eFuse Block Revision (eFuse Block Rev v0.99)"
++
++# The revision in the comment must correspond to the default value of ESP_EFUSE_BLOCK_REV_MAX_FULL
++
++menu "Cache config"
++
++choice ESPRESSIF_CACHE_L2_CACHE_SIZE_SELECT
++	prompt "L2 cache size"
++	default ESPRESSIF_CACHE_L2_CACHE_256KB
++	---help---
++		L2 cache size to be set on application startup.
++
++config ESPRESSIF_CACHE_L2_CACHE_128KB
++	bool "128KB"
++
++config ESPRESSIF_CACHE_L2_CACHE_256KB
++	bool "256KB"
++
++config ESPRESSIF_CACHE_L2_CACHE_512KB
++	bool "512KB"
++
++endchoice # ESPRESSIF_CACHE_L2_CACHE_SIZE_SELECT
++
++config ESPRESSIF_CACHE_L2_CACHE_SIZE
++	hex
++	default 0x20000 if ESPRESSIF_CACHE_L2_CACHE_128KB
++	default 0x40000 if ESPRESSIF_CACHE_L2_CACHE_256KB
++	default 0x80000 if ESPRESSIF_CACHE_L2_CACHE_512KB
++
++choice ESPRESSIF_CACHE_L2_CACHE_LINE_SIZE_SELECT
++	prompt "L2 cache line size"
++	default ESPRESSIF_CACHE_L2_CACHE_LINE_64B if ESPRESSIF_CACHE_L2_CACHE_128KB
++	default ESPRESSIF_CACHE_L2_CACHE_LINE_64B if ESPRESSIF_CACHE_L2_CACHE_256KB
++	default ESPRESSIF_CACHE_L2_CACHE_LINE_128B if ESPRESSIF_CACHE_L2_CACHE_512KB
++	---help---
++		L2 cache line size to be set on application startup.
++
++config ESPRESSIF_CACHE_L2_CACHE_LINE_64B
++	bool "64 Bytes"
++	depends on ESPRESSIF_CACHE_L2_CACHE_128KB || ESPRESSIF_CACHE_L2_CACHE_256KB
++
++config ESPRESSIF_CACHE_L2_CACHE_LINE_128B
++	bool "128 Bytes"
++
++endchoice # ESPRESSIF_CACHE_L2_CACHE_LINE_SIZE_SELECT
++
++config ESPRESSIF_CACHE_L2_CACHE_LINE_SIZE
++	int
++	default 64 if ESPRESSIF_CACHE_L2_CACHE_LINE_64B
++	default 128 if ESPRESSIF_CACHE_L2_CACHE_LINE_128B
++
++config ESPRESSIF_CACHE_L1_CACHE_LINE_SIZE
++	int
++	default 64
++
++endmenu # Cache config
++
++endif # ARCH_CHIP_ESP32P4
++
++config P4_REV3_MSPI_CRASH_AFTER_POWER_UP_WORKAROUND
++	bool
++	# The rev3 MSPI power-up errata affects all rev3.x silicon (incl. v3.1/v3.2);
++	# upstream gated this on REV_MIN_300 only, leaving v3.1+ chips unprotected
++	# (observed as random static-memory zeroing during PSRAM-heavy work).
++	default y if ESP32P4_REV_MIN_300 || ESP32P4_REV_MIN_301
++
++config P4_REV3_MSPI_WORKAROUND_SIZE
++	hex
++	default 0x100 if ESP32P4_REV_MIN_300 || ESP32P4_REV_MIN_301
++	default 0
++
+diff --git a/nuttx/arch/risc-v/src/esp32p4/Make.defs b/nuttx/arch/risc-v/src/esp32p4/Make.defs
+new file mode 100644
+--- /dev/null
++++ b/nuttx/arch/risc-v/src/esp32p4/Make.defs
++############################################################################
++# arch/risc-v/src/esp32p4/Make.defs
++#
++# SPDX-License-Identifier: Apache-2.0
++#
++# Licensed to the Apache Software Foundation (ASF) under one or more
++# contributor license agreements.  See the NOTICE file distributed with
++# this work for additional information regarding copyright ownership.  The
++# ASF licenses this file to you under the Apache License, Version 2.0 (the
++# "License"); you may not use this file except in compliance with the
++# License.  You may obtain a copy of the License at
++#
++#   http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
++# License for the specific language governing permissions and limitations
++# under the License.
++#
++############################################################################
++
++include common/Make.defs
++include common/espressif/Make.defs
++
++CHIP_CSRCS += esp_chip_rev.c
++
++CFLAGS += ${DEFINE_PREFIX}_RETARGETABLE_LOCKING
++
++# TODO: Remove these flags once ulp/lp_core/lp_core.c is updated.
++CFLAGS += -Wno-array-bounds -Wno-stringop-overflow
++

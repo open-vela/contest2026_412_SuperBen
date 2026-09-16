@@ -5,12 +5,23 @@
     (openvela.xml in this same repo) and adds this team repo as a self-ref
     project, exposing its work-form subdirectories to openvela working-tree
     locations via <linkfile>. remote/default come from the included openvela.xml.
+
+    The destinations below follow the openvela working-tree layout that this
+    submission was actually built and verified against:
+
+      app/chatui           -> apps/examples/chatui
+      board/contest_board  -> vendor/espressif/boards/esp32p4/esp32p4-function-ev-board
+
+    app/chatui is registered from apps/examples/Kconfig, which is carried in
+    overlay/apps/examples/Kconfig (see README section 3). The board directory
+    destination is the same path the build configuration references through
+    CONFIG_ARCH_BOARD_CUSTOM_DIR, so a synced working tree needs no path
+    fix-ups.
   -->
   <include name="openvela.xml"/>
 
   <project path="contest2026_412_SuperBen" name="contest2026_412_SuperBen">
-    <linkfile src="app/hello_app" dest="packages/demos/contest2026_412_hello_app"/>
-    <linkfile src="quickapp/hello_quickapp" dest="packages/apps/contest2026_412_hello_quickapp"/>
-    <linkfile src="board/contest_board" dest="vendor/openvela/boards/contest2026_412_board"/>
+    <linkfile src="app/chatui" dest="apps/examples/chatui"/>
+    <linkfile src="board/contest_board" dest="vendor/espressif/boards/esp32p4/esp32p4-function-ev-board"/>
   </project>
 </manifest>

@@ -1,0 +1,18 @@
+menuconfig EXAMPLES_CHATUI
+	tristate "Chat UI (WeChat-style)"
+	default n
+	depends on GRAPHICS_LVGL
+	---help---
+		WeChat-style chat interface for the voice assistant.
+
+if EXAMPLES_CHATUI
+
+config EXAMPLES_CHATUI_PRIORITY
+	int "chatui task priority"
+	default 100
+
+config EXAMPLES_CHATUI_STACKSIZE
+	int "chatui stack size"
+	default 32768
+
+endif

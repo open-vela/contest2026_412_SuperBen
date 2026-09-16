@@ -1,0 +1,3 @@
+ifneq ($(CONFIG_EXAMPLES_CHATUI),)
+CONFIGURED_APPS += $(APPDIR)/examples/chatui
+endif

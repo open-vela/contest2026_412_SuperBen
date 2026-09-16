@@ -1,11 +1,37 @@
 #
-# Contest 2026 team 000 board placeholder
+# For a description of the syntax of this configuration file,
+# see the file kconfig-language.txt in the NuttX tools repository.
 #
 
-if ARCH_BOARD_CONTEST2026_000_BOARD
+if ARCH_BOARD_CUSTOM
 
-config ARCH_BOARD_CONTEST2026_000_BOARD_TAG
-	string "Board tag"
-	default "contest2026_000_board"
+# ESP32-P4X Function EV Board (openvela contest port)
+# Peripheral configs will be added incrementally (see minimum_nsh_baseline.md)
 
-endif
+endif # ARCH_BOARD_CUSTOM
+
+config ESP32P4_LCD
+	bool "Enable ESP32-P4X ST7789 LCD (SPI)"
+	default n
+	select ESPRESSIF_SPI2
+	select SPI
+	select SPI_CMDDATA
+	select SPI_EXCHANGE
+	select LCD
+	select LCD_DEV
+	select LCD_ST7789
+	select LCD_FRAMEBUFFER
+	---help---
+		Enable board LCD support, IC is ST7789 (SPI).
+		TODO: fill real GPIO pins (BCKL) once board arrives.
+
+config ESP32P4_LCD_EK79007
+	bool "Enable EK79007 MIPI-DSI 7-inch LCD (1024x600)"
+	default n
+	select ESPRESSIF_MIPI_DSI
+	select FB
+	---help---
+		Enable board MIPI-DSI LCD support, IC is EK79007AD (7 inch,
+		1024x600, RGB565). Uses the esp_mipi_dsi host driver and
+		registers /dev/fb0. Backlight on GPIO26, reset on GPIO27.
+

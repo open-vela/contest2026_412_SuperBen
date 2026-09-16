@@ -1,0 +1,282 @@
+diff --git a/apps/examples/chatui/chatui.c b/apps/examples/chatui/chatui.c
+new file mode 100644
+--- /dev/null
++++ b/apps/examples/chatui/chatui.c
++/****************************************************************************
++ * apps/examples/chatui/chatui.c
++ *
++ * 微信式聊天界面 —— openvela 语音助手的前端显示
++ *
++ * - 顶部标题栏（"openvela"）
++ * - 浅灰背景（微信同款）
++ * - 左侧白色气泡 = 板子说的话
++ * - 右侧绿色气泡 = 用户说的话
++ * - 通过 POSIX 消息队列 /chatmq 实时接收新消息
++ *
++ * 消息结构：chat_msg_t { uint8_t from_user; char text[256]; }
++ *   from_user = 0 → 板子（左侧白气泡）
++ *   from_user = 1 → 用户（右侧绿气泡）
++ ****************************************************************************/
++
++#include <nuttx/config.h>
++#include <stdio.h>
++#include <string.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <errno.h>
++#include <sys/boardctl.h>
++#include <mqueue.h>
++
++#include <lvgl/lvgl.h>
++
++/* ── 配置 ───────────────────────────────────────────────────── */
++
++#define MQ_NAME        "chatmq"
++#define MQ_MAXMSG      16
++#define MQ_MAXSIZE     272
++#define CHAT_TITLE     "openvela"
++
++#define COLOR_BG       lv_color_hex(0xEDEDED)   /* 微信浅灰背景 */
++#define COLOR_TOPBAR   lv_color_hex(0x07C160)   /* 微信绿标题栏 */
++#define COLOR_BOARD    lv_color_hex(0xFFFFFF)   /* 板子气泡白 */
++#define COLOR_USER     lv_color_hex(0x95EC69)   /* 用户气泡绿 */
++#define COLOR_TEXT     lv_color_hex(0x1A1A1A)   /* 文字近黑 */
++
++typedef struct
++{
++  uint8_t from_user;      /* 0 = 板子, 1 = 用户 */
++  char    text[256];
++} chat_msg_t;
++
++/* ── 全局 ───────────────────────────────────────────────────── */
++
++static lv_obj_t *g_msg_cont;   /* 消息列表容器（flex 纵向） */
++static mqd_t     g_mq = -1;
++
++/* ── 添加一条消息气泡 ───────────────────────────────────────── */
++
++static void chat_add_message(const char *text, int from_user)
++{
++  lv_obj_t *row;
++  lv_obj_t *bubble;
++  lv_obj_t *label;
++
++  if (text == NULL || text[0] == '\0')
++    {
++      return;
++    }
++
++  /* 每一行：占满宽度的透明容器，气泡在左或右对齐 */
++  row = lv_obj_create(g_msg_cont);
++  lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
++  lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
++  lv_obj_set_style_border_width(row, 0, 0);
++  lv_obj_set_style_pad_all(row, 0, 0);
++  lv_obj_set_style_pad_row(row, 8, 0);
++
++  /* 气泡 */
++  bubble = lv_obj_create(row);
++  lv_obj_set_size(bubble, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
++  lv_obj_set_style_radius(bubble, 10, 0);
++  lv_obj_set_style_pad_all(bubble, 10, 0);
++  lv_obj_set_style_pad_gap(bubble, 6, 0);
++  lv_obj_set_style_border_width(bubble, 0, 0);
++
++  if (from_user)
++    {
++      lv_obj_set_style_bg_color(bubble, COLOR_USER, 0);
++      lv_obj_set_width(bubble, LV_PCT(62));
++      lv_obj_align(bubble, LV_ALIGN_TOP_RIGHT, 0, 0);
++    }
++  else
++    {
++      lv_obj_set_style_bg_color(bubble, COLOR_BOARD, 0);
++      lv_obj_set_width(bubble, LV_PCT(62));
++      lv_obj_align(bubble, LV_ALIGN_TOP_LEFT, 0, 0);
++    }
++
++  /* 文字 */
++  label = lv_label_create(bubble);
++  lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
++  lv_label_set_text(label, text);
++  lv_obj_set_style_text_color(label, COLOR_TEXT, 0);
++  lv_obj_set_width(label, LV_PCT(100));
++}
++
++/* ── 构建聊天界面 ───────────────────────────────────────────── */
++
++static void chat_build_ui(lv_obj_t *screen)
++{
++  lv_obj_t *topbar;
++  lv_obj_t *title;
++
++  /* 屏幕背景 */
++  lv_obj_set_style_bg_color(screen, COLOR_BG, 0);
++
++  /* 顶部标题栏 */
++  topbar = lv_obj_create(screen);
++  lv_obj_set_size(topbar, LV_PCT(100), 48);
++  lv_obj_set_style_bg_color(topbar, COLOR_TOPBAR, 0);
++  lv_obj_set_style_radius(topbar, 0, 0);
++  lv_obj_set_style_border_width(topbar, 0, 0);
++  lv_obj_align(topbar, LV_ALIGN_TOP_MID, 0, 0);
++
++  title = lv_label_create(topbar);
++  lv_label_set_text(title, CHAT_TITLE);
++  lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
++  lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
++  lv_obj_center(title);
++
++  /* 消息列表容器（flex 纵向，可滚动） */
++  g_msg_cont = lv_obj_create(screen);
++  lv_obj_set_size(g_msg_cont, LV_PCT(100), LV_PCT(100));
++  lv_obj_set_pos(g_msg_cont, 0, 48);
++  lv_obj_set_flex_flow(g_msg_cont, LV_FLEX_FLOW_COLUMN);
++  lv_obj_set_flex_align(g_msg_cont, LV_FLEX_ALIGN_START,
++                        LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_START);
++  lv_obj_set_style_bg_color(g_msg_cont, COLOR_BG, 0);
++  lv_obj_set_style_border_width(g_msg_cont, 0, 0);
++  lv_obj_set_style_pad_all(g_msg_cont, 12, 0);
++  lv_obj_set_style_pad_row(g_msg_cont, 10, 0);
++  lv_obj_set_scroll_dir(g_msg_cont, LV_DIR_VER);
++  lv_obj_set_scrollbar_mode(g_msg_cont, LV_SCROLLBAR_MODE_OFF);
++}
++
++/* ── 主程序 ─────────────────────────────────────────────────── */
++
++int main(int argc, char *argv[])
++{
++  lv_nuttx_dsc_t    info;
++  lv_nuttx_result_t result;
++  struct mq_attr    attr;
++  chat_msg_t        msg;
++
++  /* 板级初始化（若需要） */
++#ifdef CONFIG_BOARDCTL
++  boardctl(BOARDIOC_INIT, 0);
++#endif
++
++  /* 打开消息队列（失败则跳过，仅显示内置示例） */
++  attr.mq_maxmsg  = MQ_MAXMSG;
++  attr.mq_msgsize = MQ_MAXSIZE;
++  attr.mq_flags   = 0;
++  g_mq = mq_open(MQ_NAME, O_RDONLY | O_CREAT | O_NONBLOCK, 0666, &attr);
++  if (g_mq < 0)
++    {
++      printf("[chatui] mq_open failed errno=%d, no live messages\n", errno);
++    }
++
++  /* 初始化 LVGL + NuttX 显示/触摸 */
++  lv_init();
++  lv_nuttx_dsc_init(&info);
++  info.fb_path    = "/dev/fb0";
++  info.input_path = "/dev/input0";
++  lv_nuttx_init(&info, &result);
++
++  if (result.disp == NULL)
++    {
++      printf("[chatui] display init failed\n");
++      return 1;
++    }
++
++  /* 构建界面 */
++  chat_build_ui(lv_screen_active());
++
++  printf("[chatui] UI ready\n");
++
++  /* 主循环：刷新 UI + 读取消息队列 */
++  for (;;)
++    {
++      lv_timer_handler();
++
++      /* 非阻塞读消息 */
++      if (g_mq >= 0)
++        {
++          ssize_t n = mq_receive(g_mq, (char *)&msg, sizeof(msg), NULL);
++          if (n == sizeof(msg))
++            {
++              chat_add_message(msg.text, msg.from_user);
++            }
++        }
++
++      usleep(5000);
++    }
++
++  return 0;
++}
++
+diff --git a/apps/examples/chatui/CMakeLists.txt b/apps/examples/chatui/CMakeLists.txt
+new file mode 100644
+--- /dev/null
++++ b/apps/examples/chatui/CMakeLists.txt
++if(CONFIG_EXAMPLES_CHATUI)
++  nuttx_add_application(
++    NAME
++    chatui
++    PRIORITY
++    ${CONFIG_EXAMPLES_CHATUI_PRIORITY}
++    STACKSIZE
++    ${CONFIG_EXAMPLES_CHATUI_STACKSIZE}
++    MODULE
++    ${CONFIG_EXAMPLES_CHATUI}
++    DEPENDS
++    lvgl
++    SRCS
++    chatui.c)
++endif()
++
+diff --git a/apps/examples/chatui/Kconfig b/apps/examples/chatui/Kconfig
+new file mode 100644
+--- /dev/null
++++ b/apps/examples/chatui/Kconfig
++menuconfig EXAMPLES_CHATUI
++	tristate "Chat UI (WeChat-style)"
++	default n
++	depends on GRAPHICS_LVGL
++	---help---
++		WeChat-style chat interface for the voice assistant.
++
++if EXAMPLES_CHATUI
++
++config EXAMPLES_CHATUI_PRIORITY
++	int "chatui task priority"
++	default 100
++
++config EXAMPLES_CHATUI_STACKSIZE
++	int "chatui stack size"
++	default 32768
++
++endif
++
+diff --git a/apps/examples/chatui/Make.defs b/apps/examples/chatui/Make.defs
+new file mode 100644
+--- /dev/null
++++ b/apps/examples/chatui/Make.defs
++ifneq ($(CONFIG_EXAMPLES_CHATUI),)
++CONFIGURED_APPS += $(APPDIR)/examples/chatui
++endif
++
+diff --git a/apps/examples/chatui/Makefile b/apps/examples/chatui/Makefile
+new file mode 100644
+--- /dev/null
++++ b/apps/examples/chatui/Makefile
++include $(APPDIR)/Make.defs
++
++PROGNAME = chatui
++PRIORITY = $(CONFIG_EXAMPLES_CHATUI_PRIORITY)
++STACKSIZE = $(CONFIG_EXAMPLES_CHATUI_STACKSIZE)
++MODULE = $(CONFIG_EXAMPLES_CHATUI)
++
++MAINSRC = chatui.c
++
++include $(APPDIR)/Application.mk
++
+diff --git a/apps/examples/Kconfig b/apps/examples/Kconfig
+new file mode 100644
+--- /dev/null
++++ b/apps/examples/Kconfig
++
++source "$APPDIR/examples/objdetect/Kconfig"
++source "$APPDIR/examples/sa8339/Kconfig"
++source "$APPDIR/examples/chatui/Kconfig"
++

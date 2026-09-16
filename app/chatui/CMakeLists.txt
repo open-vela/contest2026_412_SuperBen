@@ -1,0 +1,15 @@
+if(CONFIG_EXAMPLES_CHATUI)
+  nuttx_add_application(
+    NAME
+    chatui
+    PRIORITY
+    ${CONFIG_EXAMPLES_CHATUI_PRIORITY}
+    STACKSIZE
+    ${CONFIG_EXAMPLES_CHATUI_STACKSIZE}
+    MODULE
+    ${CONFIG_EXAMPLES_CHATUI}
+    DEPENDS
+    lvgl
+    SRCS
+    chatui.c)
+endif()
