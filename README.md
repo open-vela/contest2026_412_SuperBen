@@ -174,11 +174,27 @@ vela> ask Hello, openvela
 
 ## 关于 AI Coding 日志
 
-`logs/` 已按官方要求归集并提交。需要如实说明：本作品的主要开发过程
-（板级 bringup、驱动排障、云端语音后端、界面联调）并非全部在官方白名单
-工具（Claude Code / AIoT-IDE / OpenCode / Codex）中完成，因此
-`logs/` 中可用会话数量少于实际工时。仓内保留的是采集器实际落盘的记录，
-未做任何人工增补或修改。`validate-log.py` 可通过合规性校验。
+`logs/` 已按官方要求归集并提交，共 **3 个会话 / 11 条事件**，全部位于
+`logs/Aurora-QIU0/2026-09-09/`，已通过官方
+`contest-log-collector/tools/validate-log.py` 校验（`✅ ALL OK`）。
+
+需要如实说明采集情况：
+
+| 会话 | 事件数 | 采集方式 |
+|---|---|---|
+| `ses_f79bf4b32ffe5qQgVNArrGIZsP` | 7 | 插件自动采集（`collection_mode: cli`），含 reasoning 与工具调用 |
+| `ses_f79c4b883ffec44l1cNMN8UnXx` | 2 | 官方 `export-session.py --backfill --source opencode` 补导 |
+| `ses_f79c263c1ffe3ZHW1Nplhv9bHc` | 2 | 同上 |
+
+其中后两个会话此前从未被插件导出（插件仅在 `session.idle` 事件触发、
+且要求工作区存在 `.repo/`），本次用官方 backfill 从 OpenCode 本地库
+（`~/.local/share/opencode/opencode.db`）按官方格式补导，manifest 中标记为
+`collection_mode: backfill-sqlite`。
+
+另一方面，本作品的主要开发过程（板级 bringup、驱动排障、云端语音后端、界面联调）
+并非全部在官方白名单工具（Claude Code / AIoT-IDE / OpenCode / Codex）中完成，
+因此 `logs/` 中记录的会话数与实际工时并不相称。仓内保留的是采集器与官方
+backfill 实际产出的记录，未做任何人工增补、改写或美化。
 
 AI 相关产出另有一个可复用的沉淀：`.claude/skills/embedded-false-success-debug/`
 （嵌入式驱动「假成功」类故障排查方法论，即本作品 I2C 根因排查过程的方法化）。
